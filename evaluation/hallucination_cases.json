@@ -1,0 +1,12 @@
+[
+  {
+    "evidence": "Employees receive 24 annual leaves.",
+    "model_output": "Employees receive 24 annual leaves per year.",
+    "expected_risk": "LOW"
+  },
+  {
+    "evidence": "Employees receive 24 annual leaves.",
+    "model_output": "Employees receive 30 annual leaves per year.",
+    "expected_risk": "HIGH"
+  }
+]
