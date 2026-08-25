@@ -234,22 +234,18 @@ def chat(req: ChatRequest, db: Session = Depends(get_db)):
 
 @app.get("/api/interactions")
 def get_all_interactions(db: Session = Depends(get_db)):
-    # Query the database for all interaction records
     interactions = db.query(DBInteraction).all()
     return interactions
 
 @app.get("/api/interactions/{interaction_id}")
 def get_interaction_details(interaction_id: str, db: Session = Depends(get_db)):
-    # Query all three tables for the matching ID
     interaction = db.query(DBInteraction).filter(DBInteraction.id == interaction_id).first()
     risk = db.query(DBRiskAssessment).filter(DBRiskAssessment.interaction_id == interaction_id).first()
     decision = db.query(DBDecision).filter(DBDecision.interaction_id == interaction_id).first()
     
-    # Return an error if the ID doesn't exist
     if not interaction:
         return {"error": "Interaction not found"}
         
-    # Package and return the full audit trail
     return {
         "interaction": interaction,
         "risk": risk,
