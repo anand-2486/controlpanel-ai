@@ -1,5 +1,14 @@
-from fastapi import FastAPI
+import uuid
+from fastapi import FastAPI, Depends
 from pydantic import BaseModel
+from sqlalchemy import create_engine, Column, String, Float, Boolean
+from sqlalchemy.orm import declarative_base, sessionmaker, Session
+
+
+SQLALCHEMY_DATABASE_URL = "sqlite:///./controlpanel.db"
+engine = create_engine(SQLALCHEMY_DATABASE_URL, connect_args={"check_same_thread": False})
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+Base = declarative_base()
 
 app = FastAPI(title="Control Panel.ai")
 
@@ -23,6 +32,38 @@ class LLMGateway:
     def generate(self, prompt: str, context=None) -> str:
         return "This is a mock response from the LLM Gateway."
 
+class DBInteraction(Base):
+    __tablename__ = "interactions"
+    id = Column(String, primary_key=True, index=True)
+    app_id = Column(String)
+    user_id = Column(String)
+    prompt = Column(String)
+    response = Column(String)
+
+class DBRiskAssessment(Base):
+    __tablename__ = "risk_assessments"
+    interaction_id = Column(String, primary_key=True)
+    privacy = Column(Float)
+    hallucination = Column(Float)
+    bias = Column(Float)
+    security = Column(Float)
+    policy = Column(Float)
+    overall = Column(Float)
+
+class DBDecision(Base):
+    __tablename__ = "decisions"
+    interaction_id = Column(String, primary_key=True)
+    action = Column(String)
+    reason = Column(String)
+
+Base.metadata.create_all(bind=engine)
+
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
 llm = LLMGateway()
 
 policies_db = {
@@ -100,7 +141,6 @@ def get_policy(policy_id: str):
     return policies_db.get(policy_id)
 
 def detect_pii(text: str):
-    # A simple mock detector that flags if the word "phone" or "salary" is in the prompt
     if "phone" in text.lower() or "salary" in text.lower():
         return {
             "detected": True,
@@ -108,43 +148,89 @@ def detect_pii(text: str):
         }
     return {"detected": False, "evidence": []}
 
+def calculate_risk(results: dict) -> dict:
+    overall = (
+        0.30 * results.get("privacy", 0.0) +
+        0.30 * results.get("hallucination", 0.0) +
+        0.15 * results.get("bias", 0.0) +
+        0.15 * results.get("security", 0.0) +
+        0.10 * results.get("policy", 0.0)
+    )
+    results["overall"] = round(overall, 2)
+    return results
+
+def make_decision(risk_score: float) -> str:
+    if risk_score <= 0.30: return "ALLOW"
+    if risk_score <= 0.50: return "ALLOW+WARNING"
+    if risk_score <= 0.70: return "FLAG"
+    if risk_score <= 0.85: return "HUMAN_REVIEW"
+    return "BLOCK"
+
 @app.post("/api/chat", response_model=ChatResponse)
-def chat(req: ChatRequest):
-    # 1. Fetch the application context and policy
+def chat(req: ChatRequest, db: Session = Depends(get_db)):
+    interaction_id = f"int_{uuid.uuid4().hex[:8]}"
+    
     app_context = get_application(req.application_id)
     policy = get_policy(app_context["policy_id"])
     
-    # 2. Run the Input Guard (PII Detection)
     input_result = detect_pii(req.message)
     
-    # 3. Enforce the Policy Decision
+    response_text = ""
+    risk_scores = {"privacy": 0.0, "hallucination": 0.0, "bias": 0.0, "security": 0.0, "policy": 0.0}
+    reasons = []
+
     if input_result["detected"]:
         if policy["config"]["pii_action"] == "BLOCK":
-            return {
-                "interaction_id": "demo-002",
-                "response": "Request blocked due to PII violation.",
-                "risk": {"privacy": 1.0, "hallucination": 0.0, "bias": 0.0, "security": 0.0, "policy": 1.0, "overall": 1.0},
-                "decision": "BLOCK",
-                "reasons": ["Sensitive employee information detected"]
-            }
+            response_text = "Request blocked due to PII violation."
+            risk_scores["privacy"] = 1.0
+            risk_scores["policy"] = 1.0
+            reasons.append("Sensitive information detected")
         elif policy["config"]["pii_action"] == "REDACT":
-            # Simple redaction mock
             safe_message = req.message.replace("phone", "****").replace("salary", "****")
-            response = llm.generate(safe_message)
-            return {
-                "interaction_id": "demo-002",
-                "response": f"REDACTED PROMPT SENT: {response}",
-                "risk": {"privacy": 0.5, "hallucination": 0.0, "bias": 0.0, "security": 0.0, "policy": 0.5, "overall": 0.5},
-                "decision": "EDIT",
-                "reasons": ["PII redacted before processing"]
-            }
+            response_text = llm.generate(safe_message)
+            risk_scores["privacy"] = 0.5
+            reasons.append("PII redacted")
+    else:
+        response_text = llm.generate(req.message)
 
-    # 4. Normal Execution if no PII is found
-    response = llm.generate(req.message)
+    final_risk = calculate_risk(risk_scores)
+    if input_result["detected"]:
+        if policy["config"]["pii_action"] == "BLOCK":
+            decision = "BLOCK"
+        elif policy["config"]["pii_action"] == "REDACT":
+            decision = "EDIT"
+    else:
+        decision = make_decision(final_risk["overall"])
+
+    db_interaction = DBInteraction(
+        id=interaction_id, 
+        app_id=req.application_id, 
+        user_id=req.user_id, 
+        prompt=req.message, 
+        response=response_text
+    )
+    db_risk = DBRiskAssessment(
+        interaction_id=interaction_id, 
+        **final_risk
+    )
+    db_decision = DBDecision(
+        interaction_id=interaction_id, 
+        action=decision, 
+        reason=", ".join(reasons) if reasons else "No violations"
+    )
+
+    db.add(db_interaction)
+    db.add(db_risk)
+    db.add(db_decision)
+    db.commit()
+
     return {
-        "interaction_id": "demo-002",
-        "response": response,
-        "risk": {"privacy": 0.0, "hallucination": 0.0, "bias": 0.0, "security": 0.0, "policy": 0.0, "overall": 0.0},
-        "decision": "ALLOW",
-        "reasons": []
+        "interaction_id": interaction_id,
+        "response": response_text,
+        "risk": final_risk,
+        "decision": decision,
+        "reasons": reasons
     }
+
+
+
