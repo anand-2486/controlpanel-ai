@@ -4,6 +4,8 @@ from pydantic import BaseModel
 from sqlalchemy import create_engine, Column, String, Float, Boolean
 from sqlalchemy.orm import declarative_base, sessionmaker, Session
 
+# Import our custom ML detectors
+from app.detectors import PIIDetector, PromptInjectionDetector, HallucinationDetector, BiasDetector
 
 SQLALCHEMY_DATABASE_URL = "sqlite:///./controlpanel.db"
 engine = create_engine(SQLALCHEMY_DATABASE_URL, connect_args={"check_same_thread": False})
@@ -11,6 +13,12 @@ SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
 app = FastAPI(title="Control Panel.ai")
+
+# Initialize our real ML engines
+pii_engine = PIIDetector()
+injection_engine = PromptInjectionDetector()
+hallucination_engine = HallucinationDetector()
+bias_engine = BiasDetector()
 
 @app.get("/health")
 def health_check():
@@ -64,6 +72,7 @@ def get_db():
         yield db
     finally:
         db.close()
+
 llm = LLMGateway()
 
 policies_db = {
@@ -124,13 +133,11 @@ def get_policies():
 
 @app.post("/api/policies")
 def create_policy(policy: dict):
-    # Basic mock for Day 2 contract
     policies_db[policy["id"]] = policy
     return {"status": "success", "policy": policy}
 
 @app.put("/api/policies/{policy_id}")
 def update_policy(policy_id: str, policy: dict):
-    # Basic mock for Day 2 contract
     policies_db[policy_id] = policy
     return {"status": "success", "policy": policy}
 
@@ -139,14 +146,6 @@ def get_application(application_id: str):
 
 def get_policy(policy_id: str):
     return policies_db.get(policy_id)
-
-def detect_pii(text: str):
-    if "phone" in text.lower() or "salary" in text.lower():
-        return {
-            "detected": True,
-            "evidence": ["phone", "salary"]
-        }
-    return {"detected": False, "evidence": []}
 
 def calculate_risk(results: dict) -> dict:
     overall = (
@@ -166,66 +165,66 @@ def make_decision(risk_score: float) -> str:
     if risk_score <= 0.85: return "HUMAN_REVIEW"
     return "BLOCK"
 
-def evaluate_bias(response_text: str) -> float:
-    biased_keywords = ["always", "never", "obviously", "stupid", "lazy"]
-    if any(word in response_text.lower() for word in biased_keywords):
-        return 0.85
-    return 0.10 
-
-def evaluate_hallucination(prompt: str, response_text: str) -> float:
-    # Simulating a hallucination detector
-    if "I don't know" in response_text or "made up" in response_text:
-        return 0.90
-    if len(response_text) > 200:
-        return 0.40
-    return 0.05
-
 @app.post("/api/chat", response_model=ChatResponse)
 def chat(req: ChatRequest, db: Session = Depends(get_db)):
     interaction_id = f"int_{uuid.uuid4().hex[:8]}"
-    
     app_context = get_application(req.application_id)
     policy = get_policy(app_context["policy_id"])
-    
-    input_result = detect_pii(req.message)
     
     response_text = ""
     risk_scores = {"privacy": 0.0, "hallucination": 0.0, "bias": 0.0, "security": 0.0, "policy": 0.0}
     reasons = []
-
-    if input_result["detected"]:
+    
+    # 1. ENFORCE INPUT GUARDRAILS (Real ML)
+    pii_result, redacted_prompt = pii_engine.detect(req.message)
+    injection_result = injection_engine.detect(req.message)
+    
+    if injection_result["detected"]:
+        response_text = "Request blocked due to prompt injection attempt."
+        risk_scores["security"] = injection_result["score"]
+        reasons.append(injection_result["reason"])
+        decision = "BLOCK"
+        
+    elif pii_result["detected"]:
+        risk_scores["privacy"] = pii_result["score"]
+        reasons.append(pii_result["reason"])
+        
         if policy["config"]["pii_action"] == "BLOCK":
             response_text = "Request blocked due to PII violation."
-            risk_scores["privacy"] = 1.0
-            risk_scores["policy"] = 1.0
-            reasons.append("Sensitive information detected")
-        elif policy["config"]["pii_action"] == "REDACT":
-            safe_message = req.message.replace("phone", "****").replace("salary", "****")
-            response_text = llm.generate(safe_message)
-            risk_scores["privacy"] = 0.5
-            reasons.append("PII redacted")
-    else:
-        response_text = llm.generate(req.message)
-
-    if response_text != "Request blocked due to PII violation.":
-        risk_scores["bias"] = evaluate_bias(response_text)
-        risk_scores["hallucination"] = evaluate_hallucination(req.message, response_text)
-        
-        if risk_scores["bias"] > 0.5:
-            reasons.append("High bias detected in AI output")
-        if risk_scores["hallucination"] > 0.5:
-            reasons.append("Potential hallucination detected")
-
-    final_risk = calculate_risk(risk_scores)
-    
-    if input_result["detected"]:
-        if policy["config"]["pii_action"] == "BLOCK":
             decision = "BLOCK"
-        elif policy["config"]["pii_action"] == "REDACT":
+        else:
+            # REDACT action: pass the safely redacted prompt to the LLM
+            response_text = llm.generate(redacted_prompt)
             decision = "EDIT"
     else:
+        # Safe input: proceed normally
+        response_text = llm.generate(req.message)
+        decision = "ALLOW"
+
+    # 2. ENFORCE OUTPUT GUARDRAILS (Real ML)
+    if decision not in ["BLOCK"]:
+        # Hardcoded evidence string to test the hallucination engine
+        mock_evidence = "Employees receive 24 annual leaves."
+        hallucination_result = hallucination_engine.detect(response_text, evidence=mock_evidence)
+        
+        if hallucination_result["detected"]:
+            risk_scores["hallucination"] = hallucination_result["score"]
+            reasons.append(hallucination_result["reason"])
+
+        # Compare the response against itself as a baseline for the bias check
+        bias_result = bias_engine.detect(response_text, text_b=response_text)
+        if bias_result["detected"]:
+            risk_scores["bias"] = bias_result["score"]
+            reasons.append(bias_result["reason"])
+
+    # 3. Calculate Final Mathematical Risk
+    final_risk = calculate_risk(risk_scores)
+    
+    # If output risk gets too high, override the ALLOW decision
+    if decision != "BLOCK" and final_risk["overall"] > 0.30:
         decision = make_decision(final_risk["overall"])
 
+    # 4. Persist to Database
     db_interaction = DBInteraction(id=interaction_id, app_id=req.application_id, user_id=req.user_id, prompt=req.message, response=response_text)
     db_risk = DBRiskAssessment(interaction_id=interaction_id, **final_risk)
     db_decision = DBDecision(interaction_id=interaction_id, action=decision, reason=", ".join(reasons) if reasons else "No violations")

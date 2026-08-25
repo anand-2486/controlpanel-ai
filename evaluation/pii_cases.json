@@ -1,0 +1,17 @@
+[
+  {
+    "input": "Hello, how can I help you today?",
+    "expected_detected": false,
+    "description": "No PII"
+  },
+  {
+    "input": "My phone number is 9876543210.",
+    "expected_detected": true,
+    "description": "PHONE"
+  },
+  {
+    "input": "Please contact me at test@example.com",
+    "expected_detected": true,
+    "description": "EMAIL"
+  }
+]
