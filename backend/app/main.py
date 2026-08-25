@@ -30,7 +30,7 @@ class ChatResponse(BaseModel):
 
 class LLMGateway:
     def generate(self, prompt: str, context=None) -> str:
-        return "This is a mock response from the LLM Gateway."
+        return f"Mock AI generating based on: {prompt}"
 
 class DBInteraction(Base):
     __tablename__ = "interactions"
@@ -166,6 +166,20 @@ def make_decision(risk_score: float) -> str:
     if risk_score <= 0.85: return "HUMAN_REVIEW"
     return "BLOCK"
 
+def evaluate_bias(response_text: str) -> float:
+    biased_keywords = ["always", "never", "obviously", "stupid", "lazy"]
+    if any(word in response_text.lower() for word in biased_keywords):
+        return 0.85
+    return 0.10 
+
+def evaluate_hallucination(prompt: str, response_text: str) -> float:
+    # Simulating a hallucination detector
+    if "I don't know" in response_text or "made up" in response_text:
+        return 0.90
+    if len(response_text) > 200:
+        return 0.40
+    return 0.05
+
 @app.post("/api/chat", response_model=ChatResponse)
 def chat(req: ChatRequest, db: Session = Depends(get_db)):
     interaction_id = f"int_{uuid.uuid4().hex[:8]}"
@@ -193,7 +207,17 @@ def chat(req: ChatRequest, db: Session = Depends(get_db)):
     else:
         response_text = llm.generate(req.message)
 
+    if response_text != "Request blocked due to PII violation.":
+        risk_scores["bias"] = evaluate_bias(response_text)
+        risk_scores["hallucination"] = evaluate_hallucination(req.message, response_text)
+        
+        if risk_scores["bias"] > 0.5:
+            reasons.append("High bias detected in AI output")
+        if risk_scores["hallucination"] > 0.5:
+            reasons.append("Potential hallucination detected")
+
     final_risk = calculate_risk(risk_scores)
+    
     if input_result["detected"]:
         if policy["config"]["pii_action"] == "BLOCK":
             decision = "BLOCK"
@@ -202,22 +226,9 @@ def chat(req: ChatRequest, db: Session = Depends(get_db)):
     else:
         decision = make_decision(final_risk["overall"])
 
-    db_interaction = DBInteraction(
-        id=interaction_id, 
-        app_id=req.application_id, 
-        user_id=req.user_id, 
-        prompt=req.message, 
-        response=response_text
-    )
-    db_risk = DBRiskAssessment(
-        interaction_id=interaction_id, 
-        **final_risk
-    )
-    db_decision = DBDecision(
-        interaction_id=interaction_id, 
-        action=decision, 
-        reason=", ".join(reasons) if reasons else "No violations"
-    )
+    db_interaction = DBInteraction(id=interaction_id, app_id=req.application_id, user_id=req.user_id, prompt=req.message, response=response_text)
+    db_risk = DBRiskAssessment(interaction_id=interaction_id, **final_risk)
+    db_decision = DBDecision(interaction_id=interaction_id, action=decision, reason=", ".join(reasons) if reasons else "No violations")
 
     db.add(db_interaction)
     db.add(db_risk)
