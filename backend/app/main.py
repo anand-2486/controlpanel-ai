@@ -232,5 +232,22 @@ def chat(req: ChatRequest, db: Session = Depends(get_db)):
         "reasons": reasons
     }
 
+@app.get("/api/interactions")
+def get_all_interactions(db: Session = Depends(get_db)):
+    interactions = db.query(DBInteraction).all()
+    return interactions
 
-
+@app.get("/api/interactions/{interaction_id}")
+def get_interaction_details(interaction_id: str, db: Session = Depends(get_db)):
+    interaction = db.query(DBInteraction).filter(DBInteraction.id == interaction_id).first()
+    risk = db.query(DBRiskAssessment).filter(DBRiskAssessment.interaction_id == interaction_id).first()
+    decision = db.query(DBDecision).filter(DBDecision.interaction_id == interaction_id).first()
+    
+    if not interaction:
+        return {"error": "Interaction not found"}
+        
+    return {
+        "interaction": interaction,
+        "risk": risk,
+        "decision": decision
+    }
