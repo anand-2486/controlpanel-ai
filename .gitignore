@@ -1,6 +1,157 @@
+# ==============================================================================
+# Python
+# ==============================================================================
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual Environments
 venv/
 .venv/
-__pycache__/
-.DS_Store
+env/
+ENV/
+env.bak/
+venv.bak/
+
+# Distribution / packaging
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Jupyter Notebook checkpoints & cache
+.ipynb_checkpoints/
+*/.ipynb_checkpoints/*
+
+# Unit test / coverage / linters
+htmlcov/
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# ==============================================================================
+# Environment Variables, Secrets & API Keys
+# ==============================================================================
 .env
+.env.*
+!.env.example
+*.env
+secrets.json
+credentials.json
+*.pem
+*.key
+*.cert
+*.crt
+
+# ==============================================================================
+# AI / ML / LLM Datasets, Models & Weights
+# ==============================================================================
+*.pt
+*.pth
+*.bin
+*.ckpt
+*.safetensors
+*.onnx
+*.h5
+*.pkl
+*.pickle
+# Large dataset directories (uncomment or add specific folders if needed)
+# /data/
+# /datasets/
+
+# ==============================================================================
+# IDEs and Text Editors
+# ==============================================================================
+.vscode/*
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
+.idea/
+*.sublime-project
+*.sublime-workspace
+*.swp
+*.swo
+*~
+
+# ==============================================================================
+# Operating System Files
+# ==============================================================================
+# Windows
+Thumbs.db
+Thumbs.db:encryptable
+ehthumbs.db
+ehthumbs_vista.db
+desktop.ini
+$RECYCLE.BIN/
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+
+# Linux
+*~
+.directory
+.Trash-*
+
+# ==============================================================================
+# DevOps / Containers / Cloud
+# ==============================================================================
+.terraform/
+*.tfstate
+*.tfstate.backup
+*.tfvars
+*.tfvars.json
+docker-compose.override.yml
+
+# ==============================================================================
+# CS Core & Compiled Binaries (C / C++ / Java / etc.)
+# ==============================================================================
+*.class
+*.exe
+*.o
+*.obj
+*.out
+*.dll
+*.so
+*.dylib
+
+# ==============================================================================
+# Logs and Databases
+# ==============================================================================
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+*.sqlite3
 *.db
+
+# Firebase / Google Cloud credentials
+backend/firebase-service-account.json
+*.json
