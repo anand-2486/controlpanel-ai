@@ -18,6 +18,9 @@ class GovernanceState(TypedDict):
     application_id: str
     policy: Dict[str, Any]  # Active DB policy thresholds
 
+    # Shared Unified Groq Judge Evaluation
+    groq_eval: Optional[Dict[str, Any]]
+
     # Intermediate Scanner Results
     pii_result: Dict[str, Any]
     security_result: Dict[str, Any]

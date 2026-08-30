@@ -75,6 +75,7 @@ def run_governance_pipeline(
         "conversation_history": conversation_history or [],
         "application_id": application_id,
         "policy": policy or {},
+        "groq_eval": None,
         "pii_result": {},
         "security_result": {},
         "bias_result": {},

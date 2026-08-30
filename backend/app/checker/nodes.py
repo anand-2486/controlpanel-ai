@@ -43,6 +43,13 @@ def input_analysis_node(state: GovernanceState) -> Dict[str, Any]:
         compound_risk = max(compound_risk, min(0.85, 0.25 * repeated_redactions))
         evidence.append(f"Repeated sensitive information requests across {repeated_redactions} dialogue turns")
 
+    # Fast unified Groq LLM-as-a-Judge evaluation run once for all downstream nodes
+    groq_eval = evaluate_with_groq(
+        prompt=prompt,
+        ai_response=ai_response,
+        context_docs=state.get("context_docs", []),
+    )
+
     duration = round((time.perf_counter() - start_time) * 1000, 2)
     trace: WorkflowStepTrace = {
         "node_name": "Context & Multi-Turn Node",
@@ -54,6 +61,7 @@ def input_analysis_node(state: GovernanceState) -> Dict[str, Any]:
             "turns_analyzed": turn_count,
             "suspicious_probes": suspicious_probes,
             "repeated_redactions": repeated_redactions,
+            "ai_judge_connected": groq_eval is not None,
         }
     }
 
@@ -63,6 +71,7 @@ def input_analysis_node(state: GovernanceState) -> Dict[str, Any]:
             "evidence": evidence,
             "turns_analyzed": turn_count,
         },
+        "groq_eval": groq_eval,
         "workflow_trace": [trace],
     }
 
@@ -122,9 +131,19 @@ def pii_scanner_node(state: GovernanceState) -> Dict[str, Any]:
             score = max(score, 0.95)
             redacted = re.sub(pat, repl, redacted, flags=re.IGNORECASE)
 
-    # Contextual keywords for privacy intent
+    # Contextual keywords for privacy intent & personal data solicitation
     intent_patterns = {
-        "Salary / Compensation disclosure": r"\b(salary|compensation|annual earnings|monthly pay)\b",
+        "Personal Phone / Contact Number Solicitation": (
+            r"\b(phone\s*number|phone\s*no|mobile\s*number|mobile\s*no|cell\s*number|cell\s*phone|contact\s*number|contact\s*no|whatsapp\s*number|telephone\s*number|call\s*number|personal\s*number|personal\s*phone)\b|"
+            r"\b(phone|mobile|cell|contact\s*no|phone\s*no|number|contact\s*details|contact\s*info)\b.*\b(of|for)\b.*\b(hr|human\s*resources|manager|employee|boss|ceo|staff|colleague|candidate|person|user|admin|recruiter|someone)\b|"
+            r"\b(give\s*me|what\s*is|tell\s*me|get|show|share|find|provide|extract|leak|send\s*me)\b.*\b(phone|mobile|cell|number|contact|email|address)\b.*\b(hr|human\s*resources|employee|manager|staff|ceo|boss|user|someone|colleague|recruiter)\b|"
+            r"\bhow\s*can\s*i\s*(call|reach|contact|phone|text|whatsapp)\b.*\b(hr|human\s*resources|employee|manager|ceo|staff)\b"
+        ),
+        "Personal Email Request": (
+            r"\b(personal\s*email|private\s*email|direct\s*email)\b|"
+            r"\b(email|email\s*id|email\s*address)\b.*\b(of|for)\b.*\b(hr|human\s*resources|manager|employee|boss|ceo|staff|colleague|candidate|recruiter)\b"
+        ),
+        "Salary / Compensation disclosure": r"\b(salary|compensation|annual earnings|monthly pay|payslip|wage)\b",
         "Personal Health / Medical data": r"\b(medical history|prescription|diagnosis|patient record|health status)\b",
         "Home / Residential address": r"\b(residential address|home address|personal address)\b",
         "Date of Birth inquiry": r"\b(date of birth|dob|birth date)\b",
@@ -132,7 +151,16 @@ def pii_scanner_node(state: GovernanceState) -> Dict[str, Any]:
     for label, pat in intent_patterns.items():
         if re.search(pat, lower):
             evidence.append(label)
-            score = max(score, 0.85)
+            score = max(score, 0.90)
+
+    # Groq LLM-as-Judge privacy risk score integration
+    groq_eval = state.get("groq_eval")
+    if groq_eval and "privacy_score" in groq_eval:
+        groq_priv = float(groq_eval.get("privacy_score", 0.0))
+        if groq_priv > score:
+            score = groq_priv
+            if groq_eval.get("explanation") and groq_eval.get("explanation") not in evidence:
+                evidence.append(f"AI Judge Privacy: {groq_eval.get('explanation')}")
 
     duration = round((time.perf_counter() - start_time) * 1000, 2)
     trace: WorkflowStepTrace = {
@@ -183,6 +211,15 @@ def security_scanner_node(state: GovernanceState) -> Dict[str, Any]:
             evidence.append(label)
             score = max(score, 0.95)
 
+    # Groq LLM-as-Judge security risk score integration
+    groq_eval = state.get("groq_eval")
+    if groq_eval and "security_score" in groq_eval:
+        groq_sec = float(groq_eval.get("security_score", 0.0))
+        if groq_sec > score:
+            score = groq_sec
+            if groq_eval.get("explanation") and groq_eval.get("explanation") not in evidence:
+                evidence.append(f"AI Judge Security: {groq_eval.get('explanation')}")
+
     duration = round((time.perf_counter() - start_time) * 1000, 2)
     trace: WorkflowStepTrace = {
         "node_name": "Security & Injection Node",
@@ -228,14 +265,14 @@ def bias_scanner_node(state: GovernanceState) -> Dict[str, Any]:
             evidence.append(label)
             score = max(score, 0.90)
 
-    # Fast Groq LLM-as-Judge check if API key exists and score is not already maximum
-    groq_eval = evaluate_with_groq(prompt=state.get("prompt", ""), ai_response=state.get("ai_response", ""), context_docs=state.get("context_docs", []))
+    # Groq LLM-as-Judge check
+    groq_eval = state.get("groq_eval") or evaluate_with_groq(prompt=state.get("prompt", ""), ai_response=state.get("ai_response", ""), context_docs=state.get("context_docs", []))
     if groq_eval and "bias_score" in groq_eval:
         groq_bias = float(groq_eval.get("bias_score", 0.0))
         if groq_bias > score:
             score = groq_bias
-            if groq_eval.get("explanation"):
-                evidence.append(f"AI Judge: {groq_eval.get('explanation')}")
+            if groq_eval.get("explanation") and groq_eval.get("explanation") not in evidence:
+                evidence.append(f"AI Judge Bias: {groq_eval.get('explanation')}")
 
     duration = round((time.perf_counter() - start_time) * 1000, 2)
     trace: WorkflowStepTrace = {
@@ -301,8 +338,8 @@ def grounding_scanner_node(state: GovernanceState) -> Dict[str, Any]:
                 evidence.append(f"Low source grounding ({round(grounding_overlap * 100, 1)}% contextual overlap with retrieved documents)")
                 score = max(score, 0.75)
 
-    # Fast Groq LLM-as-Judge hallucination scoring if available
-    groq_eval = evaluate_with_groq(prompt=state.get("prompt", ""), ai_response=state.get("ai_response", ""), context_docs=context_docs)
+    # Groq LLM-as-Judge hallucination scoring
+    groq_eval = state.get("groq_eval") or evaluate_with_groq(prompt=state.get("prompt", ""), ai_response=state.get("ai_response", ""), context_docs=context_docs)
     if groq_eval and "hallucination_score" in groq_eval:
         groq_hallu = float(groq_eval.get("hallucination_score", 0.0))
         if groq_hallu > score:
@@ -342,14 +379,179 @@ def policy_aggregator_node(state: GovernanceState) -> Dict[str, Any]:
     h_score = state.get("grounding_result", {}).get("score", 0.0)
     m_score = state.get("multi_turn_risk", {}).get("score", 0.0)
 
+    # ── High-Stakes Human-in-the-Loop (HITL) Critical Decision Evaluation ──
+    text_to_scan = f"{state.get('prompt', '')} {state.get('ai_response', '')}".strip()
+    hitl_evidence = []
+    hitl_reasons = []
+    hitl_score = 0.0
+
+    hitl_rules = [
+        # 1. Healthcare & Clinical
+        (
+            "Medical Advice / Clinical Decision",
+            r"\b(treatment\s*plan|prescribe\s*medication|medical\s*diagnosis|clinical\s*recommendation|drug\s*dosage|recommend(s)?\s*(a\s*)?treatment|surgery\s*recommendation|doctor\s*review|medical\s*advice|diagnose\s*condition|lab\s*results?\s*interpretation|alter\s*medication)\b",
+            "Medical advice: AI clinical recommendation or treatment plan requires doctor review"
+        ),
+        (
+            "Mental Health & Psychological Triage",
+            r"\b(psychiatric\s*evaluation|mental\s*health\s*diagnosis|therapy\s*plan|suicide\s*assessment|psychological\s*assessment|counselor\s*review)\b",
+            "Mental health triage: Psychological evaluation or clinical assessment requires licensed professional review"
+        ),
+
+        # 2. Legal & Regulatory
+        (
+            "Legal Decision / Contract Violation",
+            r"\b(contract\s*violation|lawyer\s*review|legal\s*liability|terminate\s*contract|breach\s*of\s*contract|binding\s*agreement|legal\s*settlement|sue\b|litigation\s*risk|legal\s*decision|attorney\s*review|draft\s*binding\s*clause)\b",
+            "Legal decision: Potential contract violation or legal liability requires lawyer review"
+        ),
+        (
+            "Regulatory Compliance & Audit Findings",
+            r"\b(gdpr\s*violation|hipaa\s*breach|regulatory\s*non-compliance|sec\s*filing\s*irregularity|compliance\s*audit\s*failure|regulatory\s*fine|subpoena|whistleblower\s*report)\b",
+            "Regulatory compliance: High-risk audit finding or compliance breach requires legal counsel review"
+        ),
+
+        # 3. Finance & Banking
+        (
+            "Financial Transaction / Refund Approval",
+            r"\b(approve\s*(a\s*)?([₹$€£]|rs\.?|inr|usd)?\s*\d+.*refund|refund\s*approval|approve\s*(a\s*)?refund|refund\s*of|financial\s*transaction|fund\s*transfer|disburse\s*funds|credit\s*limit\s*increase|wire\s*transfer|authorize\s*payment|financial\s*approval|payout\s*authorization)\b",
+            "Financial transaction: High-value refund or transaction authorization requires human manager approval"
+        ),
+        (
+            "Loan & Credit Underwriting Decision",
+            r"\b(loan\s*approval|mortgage\s*underwriting|approve\s*credit\s*application|deny\s*loan|reject\s*mortgage|credit\s*risk\s*decision|underwriter\s*review)\b",
+            "Credit underwriting: Loan or mortgage approval/denial requires human underwriter review"
+        ),
+        (
+            "Tax Filing & Financial Audit",
+            r"\b(tax\s*audit|file\s*tax\s*return|irs\s*submission|dispute\s*tax\s*liability|corporate\s*tax\s*filing|cpa\s*sign-off)\b",
+            "Financial accounting: Tax filing or audit submission requires certified accountant review"
+        ),
+
+        # 4. Human Resources & Employment
+        (
+            "Employment / Hiring Decision",
+            r"\b(recommends?\s*rejecting\s*(a\s*)?candidate|candidate\s*rejection|reject\s*(a\s*)?candidate|recruiter\s*review|hiring\s*decision|reject\s*applicant|shortlist\s*candidate|extend\s*job\s*offer)\b",
+            "Hiring decision: Candidate rejection or employment offer requires recruiter review"
+        ),
+        (
+            "Employee Termination & Disciplinary Action",
+            r"\b(terminate\s*employee|fire\s*employee|layoff|performance\s*improvement\s*plan|pip\s*issuance|disciplinary\s*action|workplace\s*harassment\s*allegation|hr\s*investigation)\b",
+            "Employment action: Disciplinary action or employee termination requires HR director review"
+        ),
+        (
+            "Compensation & Salary Adjustment",
+            r"\b(salary\s*increase|bonus\s*allocation|equity\s*grant\s*approval|compensation\s*revision|pay\s*raise\s*authorization)\b",
+            "Compensation decision: Employee salary adjustment or equity allocation requires management approval"
+        ),
+
+        # 5. Customer & Crisis Communications
+        (
+            "Sensitive Customer Escalation / Crisis Email",
+            r"\b(angry\s*customer|escalated\s*customer|review\s*before\s*sending|customer\s*legal\s*threat|crisis\s*statement|sensitive\s*email|executive\s*response|customer\s*dispute|pr\s*crisis)\b",
+            "Sensitive email: Response to angry customer or escalation requires review before sending"
+        ),
+        (
+            "Public Relations / Media Announcement",
+            r"\b(press\s*release\s*approval|media\s*statement|public\s*apology|product\s*recall\s*announcement|crisis\s*communication\s*release)\b",
+            "Public relations: High-impact media statement or public disclosure requires PR officer review"
+        ),
+
+        # 6. Trust, Safety & Content Moderation
+        (
+            "Potentially Harmful Content Moderation",
+            r"\b(potentially\s*harmful\s*content|detected\s*potentially\s*harmful|flagged\s*(as\s*)?harmful|harmful\s*content|human\s*moderator\s*review|hate\s*speech\s*review|content\s*moderation\s*queue|disturbing\s*content)\b",
+            "Content moderation: Potentially harmful content requires human moderator review"
+        ),
+        (
+            "Policy Violation / User Sanction",
+            r"\b(policy\s*violation|ban\s*(this\s*)?user|suspend\s*(this\s*)?user|user\s*sanction|flagged\s*this\s*user|account\s*termination|terms\s*of\s*service\s*violation)\b",
+            "Policy violation: User policy violation flagged requires moderator review"
+        ),
+
+        # 7. Model Confidence & Safety Edge Cases
+        (
+            "Low Confidence / Ambiguous AI Output",
+            r"\b((only\s+)?(5\d|4\d|3\d|2\d|1\d|[0-9])%\s*confident|low\s*confidence|low\s*certainty|uncertain\s*answer|confidence\s*score\s*below|human\s*verification\s*required|uncertain\s*prediction)\b",
+            "High-risk AI output: Low confidence output requires human verification"
+        ),
+
+        # 8. Infrastructure & Destructive System Operations
+        (
+            "Destructive System / External Action",
+            r"\b(delete\s*\d+\s*files|delete\s*files|drop\s*database|truncate\s*table|wipe\s*data|execute\s*command|reboot\s*server|shutdown\s*cluster|bulk\s*delete|external\s*action|delete\s*records|purge\s*storage)\b",
+            "External action: Destructive file deletion or system action requires human approval"
+        ),
+        (
+            "Production Deployment & Infrastructure Change",
+            r"\b(deploy\s*to\s*production|modify\s*firewall\s*rules|change\s*dns\s*records|reconfigure\s*load\s*balancer|terminate\s*cloud\s*instance)\b",
+            "Infrastructure change: Production deployment or network reconfiguration requires DevOps engineer approval"
+        ),
+
+        # 9. Cybersecurity & Access Control
+        (
+            "Privileged Access Control & Permissions",
+            r"\b(grant(ing)?\s*admin\s*access|admin\s*privilege|security\s*review\s*required|elevate\s*permission|sudo\s*access|root\s*access|superadmin\s*role|access\s*control|grant\s*privilege|override\s*2fa|bypass\s*mfa)\b",
+            "Access control: Granting admin access requires security review"
+        ),
+        (
+            "Security Incident & Active Breach Response",
+            r"\b(security\s*incident\s*response|isolate\s*infected\s*host|quarantine\s*workstation|ransomware\s*containment|compromised\s*credentials\s*action)\b",
+            "Security operations: Incident containment action requires SOC analyst authorization"
+        ),
+
+        # 10. Insurance, Real Estate & Procurement
+        (
+            "Insurance Claim Adjudication",
+            r"\b(insurance\s*claim\s*approval|deny\s*insurance\s*claim|damage\s*payout\s*authorization|pre-authorization\s*denial|adjuster\s*review)\b",
+            "Insurance adjudication: Claim payout authorization or denial requires claims adjuster review"
+        ),
+        (
+            "Real Estate & Tenant Eviction",
+            r"\b(tenant\s*eviction\s*notice|terminate\s*lease\s*agreement|property\s*foreclosure\s*action|withhold\s*security\s*deposit)\b",
+            "Real estate action: Lease termination or eviction notice requires property manager review"
+        ),
+        (
+            "High-Value Procurement & Vendor Contracts",
+            r"\b(purchase\s*order\s*approval|vendor\s*contract\s*signing|procurement\s*authorization|sign\s*master\s*service\s*agreement)\b",
+            "Procurement decision: High-value purchase order or vendor agreement requires procurement officer sign-off"
+        ),
+        (
+            "Academic Admissions & Integrity Sanctions",
+            r"\b(admit\s*student|reject\s*admission\s*applicant|plagiarism\s*sanction|academic\s*expulsion|revoke\s*degree)\b",
+            "Academic governance: Student admission or academic integrity sanction requires admissions board review"
+        ),
+        (
+            "Government Benefits & Visa Approvals",
+            r"\b(approve\s*visa\s*application|deny\s*welfare\s*benefit|grant\s*immigration\s*status|revoke\s*operating\s*license|permit\s*approval)\b",
+            "Government administration: Welfare benefit or immigration decision requires authorized officer review"
+        ),
+    ]
+
+    for cat_name, pat, reason_desc in hitl_rules:
+        if re.search(pat, text_to_scan, re.IGNORECASE):
+            hitl_evidence.append(f"HITL Trigger ({cat_name}): {reason_desc}")
+            hitl_reasons.append(reason_desc)
+            hitl_score = max(hitl_score, 0.90)
+
+    # Groq AI Judge human_review_score
+    groq_eval = state.get("groq_eval")
+    if groq_eval and "human_review_score" in groq_eval:
+        groq_hitl = float(groq_eval.get("human_review_score", 0.0))
+        if groq_hitl >= 0.70:
+            hitl_score = max(hitl_score, groq_hitl)
+            if groq_eval.get("explanation"):
+                hitl_evidence.append(f"AI Judge HITL: {groq_eval.get('explanation')}")
+                if not hitl_reasons:
+                    hitl_reasons.append(groq_eval.get("explanation"))
+
     # Composite calculation: maximum severity + weighted contribution
-    max_single_risk = max(p_score, s_score, b_score, h_score, m_score)
+    max_single_risk = max(p_score, s_score, b_score, h_score, m_score, hitl_score)
     weighted_composite = clamp(
-        0.35 * s_score +
+        0.30 * s_score +
         0.25 * p_score +
-        0.20 * b_score +
-        0.15 * h_score +
-        0.05 * m_score
+        0.20 * hitl_score +
+        0.15 * b_score +
+        0.10 * h_score
     )
     overall_score = max(max_single_risk, weighted_composite)
 
@@ -358,7 +560,7 @@ def policy_aggregator_node(state: GovernanceState) -> Dict[str, Any]:
         "node_name": "Policy Aggregator Node",
         "status": "PROCESSED",
         "duration_ms": duration,
-        "evidence": [f"Overall Composite Risk: {round(overall_score * 100, 1)}%"],
+        "evidence": [f"Overall Composite Risk: {round(overall_score * 100, 1)}%"] + hitl_evidence,
         "score": clamp(overall_score),
         "details": {
             "privacy": p_score,
@@ -366,6 +568,8 @@ def policy_aggregator_node(state: GovernanceState) -> Dict[str, Any]:
             "bias": b_score,
             "hallucination": h_score,
             "multi_turn": m_score,
+            "hitl_score": hitl_score,
+            "hitl_reasons": hitl_reasons,
             "overall": overall_score,
         }
     }
@@ -377,6 +581,8 @@ def policy_aggregator_node(state: GovernanceState) -> Dict[str, Any]:
             "bias": clamp(b_score),
             "hallucination": clamp(h_score),
             "multi_turn": clamp(m_score),
+            "hitl": clamp(hitl_score),
+            "hitl_reasons": hitl_reasons,
             "overall": clamp(overall_score),
         },
         "workflow_trace": [trace],
@@ -406,12 +612,18 @@ def decision_router_node(state: GovernanceState) -> Dict[str, Any]:
     action = "ALLOW"
     reason = "No significant governance risk detected"
 
+    hitl_reasons = composite.get("hitl_reasons", []) or []
+    hitl_score = composite.get("hitl", 0.0)
+
     if composite.get("security", 0.0) >= sec_thresh:
         action = inj_action if inj_action in ["BLOCK", "HUMAN_REVIEW", "FLAG"] else "BLOCK"
         reason = "High security / prompt injection risk detected exceeding policy threshold"
     elif composite.get("privacy", 0.0) >= priv_thresh:
         action = pii_action if pii_action in ["BLOCK", "HUMAN_REVIEW", "FLAG"] else "BLOCK"
         reason = "Sensitive personal / PII information detected exceeding privacy policy"
+    elif hitl_score >= 0.70 or len(hitl_reasons) > 0:
+        action = "HUMAN_REVIEW"
+        reason = hitl_reasons[0] if hitl_reasons else "Critical high-stakes action requiring human expert review"
     elif composite.get("bias", 0.0) >= bias_thresh:
         action = "BLOCK" if composite.get("bias", 0.0) >= 0.80 else "FLAG"
         reason = "Biased or discriminatory content detected exceeding policy threshold"
@@ -441,6 +653,7 @@ def decision_router_node(state: GovernanceState) -> Dict[str, Any]:
                 "privacy": priv_thresh,
                 "bias": bias_thresh,
                 "hallucination": hallu_thresh,
+                "hitl_score": hitl_score,
             }
         }
     }
