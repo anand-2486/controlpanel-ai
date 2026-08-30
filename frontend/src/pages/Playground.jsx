@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react"
+import { useNavigate } from "react-router-dom"
 import ReactMarkdown from "react-markdown"
 import remarkGfm from "remark-gfm"
 
@@ -13,6 +14,7 @@ import {
   Layers,
   Loader2,
   LockKeyhole,
+  LogIn,
   MessageSquare,
   Plus,
   RefreshCw,
@@ -24,12 +26,14 @@ import {
   Zap,
 } from "lucide-react"
 
+import { getStoredUser, isGuestUser } from "../services/authService"
+
 
 // ============================================================
 // API
 // ============================================================
 
-const API_URL = `http://${window.location.hostname || "127.0.0.1"}:8000`
+const API_URL = import.meta.env.VITE_API_URL || `http://${window.location.hostname || "127.0.0.1"}:8000`
 
 
 function getToken() {
@@ -553,49 +557,58 @@ function createAssistantMessage(
 
 
 // ============================================================
-// LOCAL CONVERSATION STORAGE
+// LOCAL CONVERSATION STORAGE (Scoped for Authenticated Users)
 // ============================================================
 
-const STORAGE_KEY =
-  "controlpanel_playground_conversations"
+const STORAGE_KEY = "controlpanel_playground_conversations"
+
+
+function getConversationStorageKey() {
+  const user = getStoredUser()
+  if (!user || user.isGuest || user.role === "GUEST") {
+    return null
+  }
+  const identifier = user.id || user.email || "authenticated"
+  return `${STORAGE_KEY}_${identifier}`
+}
 
 
 function loadSavedConversations() {
-  try {
-    const raw =
-      localStorage.getItem(
-        STORAGE_KEY
-      )
+  const user = getStoredUser()
+  // If in Guest Mode or unauthenticated, DO NOT load any saved history on refresh!
+  if (!user || user.isGuest || user.role === "GUEST") {
+    return []
+  }
 
+  const key = getConversationStorageKey()
+  if (!key) return []
+
+  try {
+    const raw = localStorage.getItem(key)
     if (!raw) return []
 
-    const parsed =
-      JSON.parse(raw)
-
-    return Array.isArray(parsed)
-      ? parsed
-      : []
+    const parsed = JSON.parse(raw)
+    return Array.isArray(parsed) ? parsed : []
   } catch {
     return []
   }
 }
 
 
-function saveConversations(
-  conversations
-) {
+function saveConversations(conversations) {
+  const user = getStoredUser()
+  // If in Guest Mode, DO NOT save conversations to persistent storage!
+  if (!user || user.isGuest || user.role === "GUEST") {
+    return
+  }
+
+  const key = getConversationStorageKey()
+  if (!key) return
+
   try {
-    localStorage.setItem(
-      STORAGE_KEY,
-      JSON.stringify(
-        conversations
-      )
-    )
+    localStorage.setItem(key, JSON.stringify(conversations))
   } catch (error) {
-    console.error(
-      "Could not save conversations:",
-      error
-    )
+    console.error("Could not save conversations:", error)
   }
 }
 
@@ -1366,6 +1379,8 @@ function HistoryItem({
 // ============================================================
 
 function Playground() {
+  const navigate = useNavigate()
+  const isGuest = isGuestUser()
 
   const [message, setMessage] =
     useState("")
@@ -1461,7 +1476,7 @@ function Playground() {
 
 
   // ==========================================================
-  // SAVE LOCAL CONVERSATIONS
+  // SAVE LOCAL CONVERSATIONS & LISTEN FOR GLOBAL CLEAR
   // ==========================================================
 
   useEffect(() => {
@@ -1469,6 +1484,24 @@ function Playground() {
       conversations
     )
   }, [conversations])
+
+  useEffect(() => {
+    function handleHistoryCleared() {
+      setConversations([])
+      setMessages([])
+      setActiveConversationId(null)
+      setHistory([])
+      setSelectedHistoryId(null)
+    }
+
+    window.addEventListener("controlpanel-history-cleared", handleHistoryCleared)
+    window.addEventListener("auth-changed", handleHistoryCleared)
+
+    return () => {
+      window.removeEventListener("controlpanel-history-cleared", handleHistoryCleared)
+      window.removeEventListener("auth-changed", handleHistoryCleared)
+    }
+  }, [])
 
 
   // ==========================================================
@@ -2645,7 +2678,7 @@ function Playground() {
                   dark:text-slate-400
                 "
               >
-                Send a message and ControlPanel.ai
+                Send a message and ControlPlane.ai
                 will evaluate the interaction through
                 your governance policies.
               </p>
@@ -3101,13 +3134,30 @@ function Playground() {
               pb-3
             "
           >
+            {/* GUEST BANNER */}
+            {isGuest && (
+              <div className="mb-3 rounded-xl border border-amber-200/80 bg-amber-50/70 p-3 text-center dark:border-amber-800/40 dark:bg-amber-950/30">
+                <p className="text-[11px] font-semibold text-amber-800 dark:text-amber-300">
+                  Guest Sandbox Active
+                </p>
+                <p className="mt-1 text-[10px] text-amber-700/80 dark:text-amber-400">
+                  Chat history is not saved across sessions. Sign in with Google to retain persistent history.
+                </p>
+                <button
+                  type="button"
+                  onClick={() => navigate("/signin")}
+                  className="mt-2.5 flex w-full items-center justify-center gap-1.5 rounded-lg bg-violet-600 px-2 py-1.5 text-[11px] font-semibold text-white shadow-xs transition hover:bg-violet-700"
+                >
+                  <LogIn size={12} />
+                  Sign In to Save Chats
+                </button>
+              </div>
+            )}
 
             {/* LOCAL CONVERSATIONS */}
-
             {conversations.length >
               0 && (
               <div className="mb-4">
-
                 <p className="mb-2 px-1 text-[9px] font-semibold uppercase tracking-wider text-slate-400">
                   Conversations
                 </p>

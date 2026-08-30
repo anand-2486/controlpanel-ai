@@ -102,21 +102,16 @@ function AppShell({ children }) {
             FIXED TOPBAR
         ================================================= */}
 
-        <header
+        <div
           className={`
             fixed
             right-0
             top-0
             z-40
-            h-20
-            border-b
-            border-slate-200
-            bg-white
+            h-[72px]
             transition-all
             duration-300
             ease-in-out
-            dark:border-slate-800
-            dark:bg-slate-900
             ${
               sidebarCollapsed
                 ? "left-[70px]"
@@ -128,7 +123,7 @@ function AppShell({ children }) {
             title={currentPage.title}
             description={currentPage.description}
           />
-        </header>
+        </div>
 
 
         {/* =================================================
@@ -140,7 +135,7 @@ function AppShell({ children }) {
             h-screen
             overflow-y-auto
             bg-slate-50
-            pt-20
+            pt-[72px]
             dark:bg-slate-950
           "
         >

@@ -148,7 +148,7 @@ function Sidebar({
                 tracking-tight
               "
             >
-              ControlPanel
+              ControlPlane
 
               <span className="text-violet-400">
                 .ai

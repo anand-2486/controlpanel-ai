@@ -258,7 +258,6 @@ function Dashboard() {
      ========================================================== */
 
   async function clearHistory() {
-
     const confirmed =
       window.confirm(
         "Are you sure you want to clear all governance history? This cannot be undone."
@@ -268,42 +267,54 @@ function Dashboard() {
       return
     }
 
-
     try {
-
       setClearing(true)
       setError("")
 
-
       /*
-       * Delete the actual records
-       * from the backend.
+       * 1. Delete the actual records from the backend.
        */
-
       await api.delete(
         "/api/history"
       )
 
+      /*
+       * 2. Clear all local playground conversation storage across all user scopes.
+       */
+      Object.keys(localStorage).forEach((key) => {
+        if (
+          key.startsWith("controlpanel_playground_conversations") ||
+          key.startsWith("controlpanel_conversations")
+        ) {
+          localStorage.removeItem(key)
+        }
+      })
+
+      Object.keys(sessionStorage).forEach((key) => {
+        if (
+          key.startsWith("controlpanel_playground_conversations") ||
+          key.startsWith("controlpanel_conversations")
+        ) {
+          sessionStorage.removeItem(key)
+        }
+      })
 
       /*
-       * Immediately clear the
-       * frontend state.
+       * 3. Notify Playground and other components to reset in-memory conversations.
        */
+      window.dispatchEvent(new CustomEvent("controlpanel-history-cleared"))
 
+      /*
+       * 4. Immediately clear the frontend dashboard state.
+       */
       setInteractions([])
 
-
       /*
-       * Reload dashboard statistics
-       * from the backend so every
-       * counter becomes accurate.
+       * 5. Reload dashboard statistics from the backend.
        */
-
       await loadDashboard()
 
-
     } catch (err) {
-
       console.error(
         "Clear history error:",
         err
@@ -313,13 +324,9 @@ function Dashboard() {
         err.response?.data?.detail ||
         "Unable to clear history."
       )
-
     } finally {
-
       setClearing(false)
-
     }
-
   }
 
 

@@ -1,10 +1,36 @@
-### Clone the github repo and then switch to "integration" branch and then create your respective branch and then switch to it and then start working by following methods
+# ControlPlane.ai 🛡️
 
-1. Set Up the Python Environment
-    Change to the backend directory: cd backend.  
-    Create a virtual environment: python -m venv venv.  Activate it (Windows: .venv\Scripts\activate, Mac/Linux: source .venv/bin/activate).  
-    Install the required packages: pip install -r requirement.txt
+> **Enterprise Responsible AI Governance & Real-Time Guardrail Control Plane**
 
-2. Run a server
-    uvicorn app.main:app --reload --port 8000
-    http://localhost:8000/health
+ControlPlane.ai provides automated AI risk evaluation, proactive policy enforcement, PII redaction, prompt injection defense, multi-turn boundary tracking, and human-in-the-loop (HITL) review routing.
+
+---
+
+## ⚡ Quick Start
+
+### 1. Backend (FastAPI + LangGraph)
+```bash
+cd backend
+python -m venv venv
+# Windows:
+.\venv\Scripts\activate
+# Mac/Linux:
+source venv/bin/activate
+
+pip install -r requirements.txt
+uvicorn app.main:app --reload --port 8000
+```
+
+### 2. Frontend (React + Vite + TailwindCSS)
+```bash
+cd frontend
+npm install
+npm run dev
+```
+
+---
+
+## 🐳 Docker Deployment
+```bash
+docker compose up -d --build
+```
