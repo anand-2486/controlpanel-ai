@@ -154,4 +154,7 @@ yarn-error.log*
 
 # Firebase / Google Cloud credentials
 backend/firebase-service-account.json
-*.json
+*service-account*.json
+*-credentials*.json
+
+.vscode
