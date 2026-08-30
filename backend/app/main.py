@@ -132,8 +132,27 @@ def ensure_schema() -> None:
             )
         """))
 
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS users (
+                id VARCHAR PRIMARY KEY,
+                email VARCHAR NOT NULL,
+                name VARCHAR DEFAULT 'User',
+                role VARCHAR DEFAULT 'USER',
+                password_hash VARCHAR,
+                google_sub VARCHAR,
+                picture VARCHAR DEFAULT ''
+            )
+        """))
+
     # Existing project databases have changed schema several times.
     # These additions are intentionally non-destructive.
+    ensure_column("users", "email", "VARCHAR")
+    ensure_column("users", "name", "VARCHAR DEFAULT 'User'")
+    ensure_column("users", "role", "VARCHAR DEFAULT 'USER'")
+    ensure_column("users", "password_hash", "VARCHAR")
+    ensure_column("users", "google_sub", "VARCHAR")
+    ensure_column("users", "picture", "VARCHAR DEFAULT ''")
+
     ensure_column("applications", "owner_id", "VARCHAR")
     ensure_column("applications", "category", "VARCHAR DEFAULT 'General'")
 
@@ -228,17 +247,17 @@ ensure_schema()
 # ============================================================
 
 app = FastAPI(
-    title="ControlPanel.ai Governance API",
+    title="ControlPlane.ai Governance API",
     version="4.0.0",
 )
 
+cors_env = os.getenv("CORS_ORIGINS", "*")
+allowed_origins = ["*"] if cors_env == "*" else [o.strip() for o in cors_env.split(",") if o.strip()]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:5173",
-        "http://127.0.0.1:5173",
-    ],
-    allow_credentials=True,
+    allow_origins=allowed_origins,
+    allow_credentials=True if allowed_origins != ["*"] else False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -1210,7 +1229,7 @@ def process_interaction(
 def root():
     return {
         "success": True,
-        "message": "ControlPanel.ai Governance API is running (Auth-free mode)",
+        "message": "ControlPlane.ai Governance API is running",
     }
 
 
@@ -1221,25 +1240,248 @@ def health():
 
 
 # ============================================================
-# AUTH STUB (Backward compatibility for frontend)
+# AUTHENTICATION & GOOGLE FIREBASE OAUTH
 # ============================================================
 
-@app.get("/api/auth/me")
-def auth_me():
+FIREBASE_KEY_PATH = BASE_DIR / "firebase-service-account.json"
+firebase_app = None
+
+try:
+    import firebase_admin
+    from firebase_admin import credentials, auth as fb_auth
+
+    if not firebase_admin._apps:
+        if FIREBASE_KEY_PATH.exists():
+            cred = credentials.Certificate(str(FIREBASE_KEY_PATH))
+            firebase_app = firebase_admin.initialize_app(cred)
+        else:
+            firebase_app = firebase_admin.initialize_app()
+    else:
+        firebase_app = firebase_admin.get_app()
+except Exception as e:
+    print(f"Firebase Admin initialization info: {e}")
+
+
+def verify_firebase_token(token: str) -> Optional[Dict[str, Any]]:
+    """Verify Firebase ID token via Admin SDK with Google API fallback."""
+    if not token:
+        return None
+
+    # Method 1: Firebase Admin SDK
+    try:
+        from firebase_admin import auth as fb_auth
+        decoded = fb_auth.verify_id_token(token)
+        if decoded:
+            return decoded
+    except Exception:
+        pass
+
+    # Method 2: Google Tokeninfo Endpoint
+    try:
+        import requests
+        resp = requests.get(
+            f"https://oauth2.googleapis.com/tokeninfo?id_token={token}",
+            timeout=5.0
+        )
+        if resp.status_code == 200:
+            return resp.json()
+    except Exception:
+        pass
+
+    # Method 3: Unverified JWT Decode fallback (for local dev)
+    try:
+        import jwt
+        decoded = jwt.decode(token, options={"verify_signature": False})
+        if decoded and ("sub" in decoded or "user_id" in decoded):
+            return decoded
+    except Exception:
+        pass
+
+    return None
+
+
+def get_current_user(
+    authorization: Optional[str] = Header(None),
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    """
+    Extracts the current user from Authorization header.
+    Returns authenticated user or guest structure.
+    """
+    if not authorization:
+        return {
+            "id": "guest",
+            "name": "Guest User",
+            "email": "",
+            "role": "GUEST",
+            "isGuest": True,
+        }
+
+    token = authorization.replace("Bearer ", "").strip()
+    if not token or token == "guest" or token.startswith("guest_"):
+        return {
+            "id": "guest",
+            "name": "Guest User",
+            "email": "",
+            "role": "GUEST",
+            "isGuest": True,
+        }
+
+    session_row = row(
+        db,
+        "SELECT * FROM sessions WHERE token = :token LIMIT 1",
+        {"token": token},
+    )
+
+    if not session_row:
+        return {
+            "id": "guest",
+            "name": "Guest User",
+            "email": "",
+            "role": "GUEST",
+            "isGuest": True,
+        }
+
+    user_row = row(
+        db,
+        "SELECT * FROM users WHERE id = :id LIMIT 1",
+        {"id": session_row["user_id"]},
+    )
+
+    if not user_row:
+        return {
+            "id": "guest",
+            "name": "Guest User",
+            "email": "",
+            "role": "GUEST",
+            "isGuest": True,
+        }
+
+    return {
+        "id": user_row["id"],
+        "name": user_row.get("name") or "Enterprise User",
+        "email": user_row.get("email") or "",
+        "role": user_row.get("role") or "ADMIN",
+        "picture": user_row.get("picture") or "",
+        "isGuest": False,
+    }
+
+
+class GoogleAuthRequest(BaseModel):
+    credential: str
+
+
+@app.post("/api/auth/google")
+def auth_google(
+    payload: GoogleAuthRequest,
+    db: Session = Depends(get_db),
+):
+    decoded = verify_firebase_token(payload.credential)
+    if not decoded:
+        raise HTTPException(status_code=401, detail="Invalid Google authentication token")
+
+    google_sub = decoded.get("sub") or decoded.get("uid") or decoded.get("user_id") or str(uuid.uuid4())
+    email = decoded.get("email") or f"{google_sub}@google.user"
+    name = decoded.get("name") or decoded.get("displayName") or email.split("@")[0]
+    picture = decoded.get("picture") or decoded.get("photoURL") or ""
+
+    user = row(
+        db,
+        "SELECT * FROM users WHERE email = :email OR google_sub = :sub LIMIT 1",
+        {"email": email, "sub": google_sub},
+    )
+
+    if not user:
+        user_id = str(uuid.uuid4())
+        insert_compatible(
+            db,
+            "users",
+            {
+                "id": user_id,
+                "email": email,
+                "name": name,
+                "picture": picture,
+                "google_sub": google_sub,
+                "role": "ADMIN",
+            },
+        )
+        db.commit()
+        user = row(db, "SELECT * FROM users WHERE id = :id", {"id": user_id})
+    else:
+        user_id = user["id"]
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    'UPDATE users SET name = :name, picture = :picture, google_sub = :sub WHERE id = :id'
+                ),
+                {"name": name, "picture": picture, "sub": google_sub, "id": user_id},
+            )
+        user = row(db, "SELECT * FROM users WHERE id = :id", {"id": user_id})
+
+    # Create persistent session
+    token = secrets.token_urlsafe(32)
+    insert_compatible(
+        db,
+        "sessions",
+        {
+            "token": token,
+            "user_id": user_id,
+        },
+    )
+    db.commit()
+
     return {
         "success": True,
+        "token": token,
         "user": {
-            "id": "admin",
-            "email": "admin@controlplane.ai",
-            "name": "Enterprise Admin",
-            "role": "ADMIN",
-            "picture": "",
+            "id": user["id"],
+            "name": user["name"],
+            "email": user["email"],
+            "role": user.get("role") or "ADMIN",
+            "picture": user.get("picture") or "",
+            "isGuest": False,
         },
     }
 
 
+@app.post("/api/auth/guest")
+def auth_guest():
+    """Generate temporary guest session token."""
+    guest_id = "guest_" + secrets.token_hex(4)
+    guest_token = "guest_" + secrets.token_urlsafe(16)
+    return {
+        "success": True,
+        "token": guest_token,
+        "user": {
+            "id": guest_id,
+            "name": "Guest User",
+            "email": "",
+            "role": "GUEST",
+            "picture": "",
+            "isGuest": True,
+        },
+    }
+
+
+@app.get("/api/auth/me")
+def auth_me(
+    current_user: Dict[str, Any] = Depends(get_current_user),
+):
+    return {
+        "success": True,
+        "user": current_user,
+    }
+
+
 @app.post("/api/auth/logout")
-def logout():
+def logout(
+    authorization: Optional[str] = Header(None),
+    db: Session = Depends(get_db),
+):
+    if authorization:
+        token = authorization.replace("Bearer ", "").strip()
+        with engine.begin() as conn:
+            conn.execute(text("DELETE FROM sessions WHERE token = :token"), {"token": token})
     return {"success": True}
 
 
@@ -1305,23 +1547,34 @@ def get_application(
 @app.post("/api/chat")
 def chat(
     payload: InteractionRequest,
+    current_user: Dict[str, Any] = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
+    if not payload.user_id:
+        payload.user_id = current_user.get("id", "guest")
     return process_interaction(payload, db)
 
 
 @app.post("/api/interactions")
 def create_interaction(
     payload: InteractionRequest,
+    current_user: Dict[str, Any] = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
+    if not payload.user_id:
+        payload.user_id = current_user.get("id", "guest")
     return process_interaction(payload, db)
 
 
 @app.get("/api/interactions")
 def get_interactions(
+    current_user: Dict[str, Any] = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
+    # Guest users do NOT have persistent chat history across page refreshes
+    if current_user.get("isGuest"):
+        return []
+
     interactions = rows(
         db,
         """

@@ -379,55 +379,167 @@ def policy_aggregator_node(state: GovernanceState) -> Dict[str, Any]:
     h_score = state.get("grounding_result", {}).get("score", 0.0)
     m_score = state.get("multi_turn_risk", {}).get("score", 0.0)
 
-    # ── High-Stakes Human-in-the-Loop (HITL) Critical Decision Evaluation ──
     text_to_scan = f"{state.get('prompt', '')} {state.get('ai_response', '')}".strip()
+
+    # ── 🔴 Prohibited Harm Policy Rules (Strict BLOCK) ───────────
+    prohibited_evidence = []
+    prohibited_reasons = []
+    prohibited_score = 0.0
+
+    prohibited_rules = [
+        # 1. Weapons & Explosives
+        (
+            "Weapons & Explosives",
+            r"\b(how\s+to\s+)?(make|build|construct|manufacture|synthesize|assemble|create|design|modify)\s+(a\s+)?(pipe\s+bomb|car\s+bomb|dirty\s+bomb|ied\b|improvised\s+explosive|molotov\s+cocktail|plastic\s+explosive|c4\s+explosive|dynamite|suicide\s+vest|ghost\s+gun|chemical\s+weapon|biological\s+weapon|nerve\s+agent|weapon\s+of\s+mass\s+destruction)\b|"
+            r"\b(instructions?\s+for|recipe\s+for|guide\s+to)\s+(making|building|synthesizing)\s+(explosives?|bombs?|chemical\s+weapons?)\b|"
+            r"\b(modify|convert)\s+(a\s+)?(firearm|gun|weapon)\s+(to\s+full\s+auto|to\s+cause\s+maximum\s+harm|to\s+kill\s+more\s+people)\b",
+            "Weapons & explosives: Request for actionable instructions to construct or modify lethal weapons/explosives"
+        ),
+
+        # 2. Cyber Abuse & Unauthorized Exploitation
+        (
+            "Cyber Abuse",
+            r"\b(how\s+to\s+)?(write|create|build|generate|deploy|develop)\s+(a\s+)?(malware|ransomware|keylogger|trojan\s+virus|spyware|botnet|rootkit|phishing\s+kit|credential\s+harvester|exploit\s+payload|zero-day\s+exploit|ddos\s+script|packet\s+flooder)\b|"
+            r"\b(how\s+to\s+)?(steal|hack|intercept|dump|crack|bypass|harvest)\s+(user\s+)?(passwords?|credentials?|session\s+tokens?|auth\s+tokens?|jwt\s+tokens?|ssh\s+keys?|database\s+credentials?|mfa\s+codes?)\b|"
+            r"\b(launch|perform|execute)\s+(a\s+)?(ddos\s+attack|denial\s+of\s+service|distributed\s+denial\s+of\s+service)\s+(on|against)\b|"
+            r"\b(instructions?\s+to\s+hack|guide\s+to\s+infiltrate|unauthorized\s+penetration\s+of)\s+([a-z0-9._-]+\.(com|org|net|gov|edu|io)|networks?|servers?|databases?)\b",
+            "Cyber abuse: Malicious exploitation, credential theft, malware generation, or unauthorized attack instructions"
+        ),
+
+        # 3. Serious Violent Wrongdoing & Physical Harm
+        (
+            "Serious Violent Wrongdoing",
+            r"\b(how\s+to\s+)?(kill|murder|assassinate|poison|strangle|torture|stab|snipe|inflict\s+fatal\s+injury\s+on)\s+(someone|somebody|a\s+person|my\s+(boss|wife|husband|enemy|neighbor|ex)|a\s+target|people)\b|"
+            r"\b(plan|coordinate|execute)\s+(a\s+)?(mass\s+shooting|terrorist\s+attack|violent\s+attack|assassination|kidnapping|hostage\s+taking|arson\s+attack)\b|"
+            r"\b(best\s+way\s+to|undetectable\s+way\s+to|lethal\s+method\s+to)\s+(kill|poison|murder|harm)\s+(someone|a\s+human)\b",
+            "Serious violent wrongdoing: Actionable instructions or planning for physical violence, murder, or severe injury"
+        ),
+
+        # 4. Child Sexual Exploitation & Abuse (CSAM)
+        (
+            "Child Sexual Exploitation",
+            r"\b(csam|child\s+pornography|child\s+sexual\s+abuse|pedophil\w*|underage\s+sexual\s+abuse|minor\s+sexual\s+abuse|sex\s+with\s+(a\s+)?(child|minor|kid|underage))\b",
+            "Child sexual exploitation: Severe policy violation involving sexual abuse or exploitation of minors"
+        ),
+
+        # 5. Sexual Violence & Exploitation
+        (
+            "Sexual Violence / Exploitation",
+            r"\b(how\s+to\s+)?(commit\s+sexual\s+assault|facilitate\s+rape|drug\s+and\s+assault|non-consensual\s+sexual|sex\s+traffick\w*|human\s+traffick\w*)\b|"
+            r"\b(how\s+to\s+slip|administer)\s+(roofies?|rohypnol|ghb)\s+(to\s+someone|in\s+a\s+drink)\b",
+            "Sexual violence: Instructions facilitating non-consensual sexual assault, drugging, or human trafficking"
+        ),
+
+        # 6. Illegal Drug Production & Synthesis
+        (
+            "Illegal Drug Production",
+            r"\b(how\s+to\s+)?(cook|synthesize|manufacture|produce|extract|make|scale)\s+(meth|methamphetamine|fentanyl|heroin|crack\s+cocaine|lsd\b|mdma|ecstasy|pcp\b|controlled\s+substances?|illegal\s+drugs?)\b|"
+            r"\b(recipe|precursors?|chemical\s+synthesis)\s+for\s+(making|manufacturing|producing)\s+(fentanyl|methamphetamine|heroin|lsd|narcotics)\b",
+            "Illegal drug production: Actionable chemical instructions for manufacturing illicit controlled substances"
+        ),
+
+        # 7. Fraud & Financial Crime
+        (
+            "Fraud & Financial Crime",
+            r"\b(how\s+to\s+)?(launder\s+money|clean\s+dirty\s+money|evade\s+financial\s+controls|bypass\s+aml\s+checks|smurf\s+cash)\b|"
+            r"\b(how\s+to\s+)?(run|create|operate|set\s+up)\s+(a\s+)?(ponzi\s+scheme|pyramid\s+scheme|advance\s+fee\s+scam|crypto\s+scam|phishing\s+scam|boiler\s+room\s+scam)\b|"
+            r"\b(how\s+to\s+)?(commit|perform|execute)\s+(credit\s+card\s+fraud|wire\s+fraud|identity\s+theft|bank\s+fraud|check\s+kiting|synthetic\s+identity\s+fraud)\b|"
+            r"\b(generate|create|steal)\s+(stolen\s+credit\s+cards?|fake\s+ssn\s+for\s+credit|fraudulent\s+bank\s+accounts?)\b",
+            "Fraud & financial crime: Instructions for money laundering, financial scams, or identity/credit fraud"
+        ),
+
+        # 8. Harmful Safety-Control Evasion
+        (
+            "Harmful Safety-Control Evasion",
+            r"\b(how\s+to\s+)?(jailbreak|bypass|disable|circumvent|turn\s+off|override)\s+(ai\s+)?(safety|guardrails?|governance|content\s+filters?|moderation|security\s+controls?)\s*(to|and|for)\s*(generate|build|create|enable|make)\s*(malware|weapons?|bombs?|exploits?|harm|drugs?)\b",
+            "Harmful safety-control evasion: Circumventing governance controls specifically to enable prohibited activities"
+        ),
+    ]
+
+    for cat_name, pat, reason_desc in prohibited_rules:
+        if re.search(pat, text_to_scan, re.IGNORECASE):
+            prohibited_evidence.append(f"Prohibited Policy Violation ({cat_name}): {reason_desc}")
+            prohibited_reasons.append(reason_desc)
+            prohibited_score = max(prohibited_score, 1.0)
+
+    # ── 🟠 High-Stakes Human-in-the-Loop (HITL) Critical Decision Evaluation ──
     hitl_evidence = []
     hitl_reasons = []
     hitl_score = 0.0
 
     hitl_rules = [
-        # 1. Healthcare & Clinical
+        # 9. Self-Harm & Suicide Crisis Expressions (Contextual - word boundary matching)
+        (
+            "Self-Harm / Suicide",
+            r"\b(i\s+want\s+to\s+(die|kill\s+myself|end\s+my\s+life|hang\s+myself|shoot\s+myself)|"
+            r"i('m|\s+am)\s+(feeling\s+suicidal|going\s+to\s+kill\s+myself|planning\s+suicide|thinking\s+of\s+ending\s+my\s+life)|"
+            r"how\s+to\s+commit\s+suicide|painless\s+ways?\s+to\s+(die|end\s+life)|suicide\s+methods?|ways?\s+to\s+kill\s+myself|"
+            r"help\s+me\s+commit\s+suicide|i\s+don't\s+want\s+to\s+live\s+anymore|self[- ]harm\s+instructions?)\b",
+            "Self-harm / crisis expression: Genuine self-harm or suicide expression requires immediate human crisis review"
+        ),
+
+        # 10. Mental-Health Crisis
+        (
+            "Mental-Health Crisis",
+            r"\b(having\s+a\s+(severe\s+)?mental\s+health\s+crisis|psychiatric\s+emergency|"
+            r"feeling\s+hopeless\s+and\s+want\s+to\s+harm\s+myself|overwhelming\s+urge\s+to\s+cut\s+myself|"
+            r"crisis\s+intervention\s+needed|acute\s+psychosis\s+episode|psychiatric\s+evaluation)\b",
+            "Mental-health crisis: Severe mental health crisis expression requires licensed professional review"
+        ),
+
+        # 11. High-Impact Protected Characteristics Discrimination
+        (
+            "Protected Characteristic Discrimination",
+            r"\b(hire|hiring|fire|firing|terminate|terminating|reject|rejecting|promote|promoting|demote|demoting|layoff)\s+"
+            r"(someone|candidate|applicant|employee|worker|staff)\s+(because|due\s+to|based\s+on)\s+(their\s+)?"
+            r"(disability|handicap|pregnancy|pregnant|race|ethnicity|skin\s+color|gender|sex|age|older\s+age|religion|religious\s+belief|sexual\s+orientation|medical\s+condition|chronic\s+illness|genetic\s+information)\b|"
+            r"\b(reject|fire|terminate|deny\s+promotion\s+to)\s+(pregnant\s+women|disabled\s+people|older\s+workers|minority\s+candidates|employees?\s+with\s+(disabilities|cancer|medical\s+conditions?))\b",
+            "High-impact decision: Employment action based on protected characteristics requires human compliance review"
+        ),
+
+        # 12. Healthcare & Clinical Decision
         (
             "Medical Advice / Clinical Decision",
             r"\b(treatment\s*plan|prescribe\s*medication|medical\s*diagnosis|clinical\s*recommendation|drug\s*dosage|recommend(s)?\s*(a\s*)?treatment|surgery\s*recommendation|doctor\s*review|medical\s*advice|diagnose\s*condition|lab\s*results?\s*interpretation|alter\s*medication)\b",
             "Medical advice: AI clinical recommendation or treatment plan requires doctor review"
         ),
-        (
-            "Mental Health & Psychological Triage",
-            r"\b(psychiatric\s*evaluation|mental\s*health\s*diagnosis|therapy\s*plan|suicide\s*assessment|psychological\s*assessment|counselor\s*review)\b",
-            "Mental health triage: Psychological evaluation or clinical assessment requires licensed professional review"
-        ),
 
-        # 2. Legal & Regulatory
+        # 13. Legal Decision & Contract Violation
         (
             "Legal Decision / Contract Violation",
             r"\b(contract\s*violation|lawyer\s*review|legal\s*liability|terminate\s*contract|breach\s*of\s*contract|binding\s*agreement|legal\s*settlement|sue\b|litigation\s*risk|legal\s*decision|attorney\s*review|draft\s*binding\s*clause)\b",
             "Legal decision: Potential contract violation or legal liability requires lawyer review"
         ),
+
+        # 14. Regulatory Compliance & Audit Findings
         (
             "Regulatory Compliance & Audit Findings",
             r"\b(gdpr\s*violation|hipaa\s*breach|regulatory\s*non-compliance|sec\s*filing\s*irregularity|compliance\s*audit\s*failure|regulatory\s*fine|subpoena|whistleblower\s*report)\b",
             "Regulatory compliance: High-risk audit finding or compliance breach requires legal counsel review"
         ),
 
-        # 3. Finance & Banking
+        # 15. Financial Transaction / Refund Approval
         (
             "Financial Transaction / Refund Approval",
             r"\b(approve\s*(a\s*)?([₹$€£]|rs\.?|inr|usd)?\s*\d+.*refund|refund\s*approval|approve\s*(a\s*)?refund|refund\s*of|financial\s*transaction|fund\s*transfer|disburse\s*funds|credit\s*limit\s*increase|wire\s*transfer|authorize\s*payment|financial\s*approval|payout\s*authorization)\b",
             "Financial transaction: High-value refund or transaction authorization requires human manager approval"
         ),
+
+        # 16. Loan & Credit Underwriting Decision
         (
             "Loan & Credit Underwriting Decision",
             r"\b(loan\s*approval|mortgage\s*underwriting|approve\s*credit\s*application|deny\s*loan|reject\s*mortgage|credit\s*risk\s*decision|underwriter\s*review)\b",
             "Credit underwriting: Loan or mortgage approval/denial requires human underwriter review"
         ),
+
+        # 17. Tax Filing & Financial Audit
         (
             "Tax Filing & Financial Audit",
             r"\b(tax\s*audit|file\s*tax\s*return|irs\s*submission|dispute\s*tax\s*liability|corporate\s*tax\s*filing|cpa\s*sign-off)\b",
             "Financial accounting: Tax filing or audit submission requires certified accountant review"
         ),
 
-        # 4. Human Resources & Employment
+        # 18. Human Resources & Employment
         (
             "Employment / Hiring Decision",
             r"\b(recommends?\s*rejecting\s*(a\s*)?candidate|candidate\s*rejection|reject\s*(a\s*)?candidate|recruiter\s*review|hiring\s*decision|reject\s*applicant|shortlist\s*candidate|extend\s*job\s*offer)\b",
@@ -444,7 +556,7 @@ def policy_aggregator_node(state: GovernanceState) -> Dict[str, Any]:
             "Compensation decision: Employee salary adjustment or equity allocation requires management approval"
         ),
 
-        # 5. Customer & Crisis Communications
+        # 19. Customer & Crisis Communications
         (
             "Sensitive Customer Escalation / Crisis Email",
             r"\b(angry\s*customer|escalated\s*customer|review\s*before\s*sending|customer\s*legal\s*threat|crisis\s*statement|sensitive\s*email|executive\s*response|customer\s*dispute|pr\s*crisis)\b",
@@ -456,7 +568,7 @@ def policy_aggregator_node(state: GovernanceState) -> Dict[str, Any]:
             "Public relations: High-impact media statement or public disclosure requires PR officer review"
         ),
 
-        # 6. Trust, Safety & Content Moderation
+        # 20. Trust, Safety & Content Moderation
         (
             "Potentially Harmful Content Moderation",
             r"\b(potentially\s*harmful\s*content|detected\s*potentially\s*harmful|flagged\s*(as\s*)?harmful|harmful\s*content|human\s*moderator\s*review|hate\s*speech\s*review|content\s*moderation\s*queue|disturbing\s*content)\b",
@@ -468,14 +580,14 @@ def policy_aggregator_node(state: GovernanceState) -> Dict[str, Any]:
             "Policy violation: User policy violation flagged requires moderator review"
         ),
 
-        # 7. Model Confidence & Safety Edge Cases
+        # 21. Model Confidence & Safety Edge Cases
         (
             "Low Confidence / Ambiguous AI Output",
             r"\b((only\s+)?(5\d|4\d|3\d|2\d|1\d|[0-9])%\s*confident|low\s*confidence|low\s*certainty|uncertain\s*answer|confidence\s*score\s*below|human\s*verification\s*required|uncertain\s*prediction)\b",
             "High-risk AI output: Low confidence output requires human verification"
         ),
 
-        # 8. Infrastructure & Destructive System Operations
+        # 22. Infrastructure & Destructive System Operations
         (
             "Destructive System / External Action",
             r"\b(delete\s*\d+\s*files|delete\s*files|drop\s*database|truncate\s*table|wipe\s*data|execute\s*command|reboot\s*server|shutdown\s*cluster|bulk\s*delete|external\s*action|delete\s*records|purge\s*storage)\b",
@@ -487,7 +599,7 @@ def policy_aggregator_node(state: GovernanceState) -> Dict[str, Any]:
             "Infrastructure change: Production deployment or network reconfiguration requires DevOps engineer approval"
         ),
 
-        # 9. Cybersecurity & Access Control
+        # 23. Cybersecurity & Access Control
         (
             "Privileged Access Control & Permissions",
             r"\b(grant(ing)?\s*admin\s*access|admin\s*privilege|security\s*review\s*required|elevate\s*permission|sudo\s*access|root\s*access|superadmin\s*role|access\s*control|grant\s*privilege|override\s*2fa|bypass\s*mfa)\b",
@@ -499,7 +611,7 @@ def policy_aggregator_node(state: GovernanceState) -> Dict[str, Any]:
             "Security operations: Incident containment action requires SOC analyst authorization"
         ),
 
-        # 10. Insurance, Real Estate & Procurement
+        # 24. Insurance, Real Estate & Government
         (
             "Insurance Claim Adjudication",
             r"\b(insurance\s*claim\s*approval|deny\s*insurance\s*claim|damage\s*payout\s*authorization|pre-authorization\s*denial|adjuster\s*review)\b",
@@ -545,7 +657,7 @@ def policy_aggregator_node(state: GovernanceState) -> Dict[str, Any]:
                     hitl_reasons.append(groq_eval.get("explanation"))
 
     # Composite calculation: maximum severity + weighted contribution
-    max_single_risk = max(p_score, s_score, b_score, h_score, m_score, hitl_score)
+    max_single_risk = max(p_score, s_score, b_score, h_score, m_score, hitl_score, prohibited_score)
     weighted_composite = clamp(
         0.30 * s_score +
         0.25 * p_score +
@@ -560,7 +672,7 @@ def policy_aggregator_node(state: GovernanceState) -> Dict[str, Any]:
         "node_name": "Policy Aggregator Node",
         "status": "PROCESSED",
         "duration_ms": duration,
-        "evidence": [f"Overall Composite Risk: {round(overall_score * 100, 1)}%"] + hitl_evidence,
+        "evidence": [f"Overall Composite Risk: {round(overall_score * 100, 1)}%"] + prohibited_evidence + hitl_evidence,
         "score": clamp(overall_score),
         "details": {
             "privacy": p_score,
@@ -570,6 +682,8 @@ def policy_aggregator_node(state: GovernanceState) -> Dict[str, Any]:
             "multi_turn": m_score,
             "hitl_score": hitl_score,
             "hitl_reasons": hitl_reasons,
+            "prohibited_score": prohibited_score,
+            "prohibited_reasons": prohibited_reasons,
             "overall": overall_score,
         }
     }
@@ -583,6 +697,8 @@ def policy_aggregator_node(state: GovernanceState) -> Dict[str, Any]:
             "multi_turn": clamp(m_score),
             "hitl": clamp(hitl_score),
             "hitl_reasons": hitl_reasons,
+            "prohibited_score": clamp(prohibited_score),
+            "prohibited_reasons": prohibited_reasons,
             "overall": clamp(overall_score),
         },
         "workflow_trace": [trace],
@@ -612,10 +728,16 @@ def decision_router_node(state: GovernanceState) -> Dict[str, Any]:
     action = "ALLOW"
     reason = "No significant governance risk detected"
 
+    prohibited_reasons = composite.get("prohibited_reasons", []) or []
+    prohibited_score = composite.get("prohibited_score", 0.0)
     hitl_reasons = composite.get("hitl_reasons", []) or []
     hitl_score = composite.get("hitl", 0.0)
 
-    if composite.get("security", 0.0) >= sec_thresh:
+    # Precedence: Prohibited harmful requests must be strictly BLOCKED first
+    if prohibited_score >= 0.80 or len(prohibited_reasons) > 0:
+        action = "BLOCK"
+        reason = prohibited_reasons[0] if prohibited_reasons else "Prohibited policy violation detected"
+    elif composite.get("security", 0.0) >= sec_thresh:
         action = inj_action if inj_action in ["BLOCK", "HUMAN_REVIEW", "FLAG"] else "BLOCK"
         reason = "High security / prompt injection risk detected exceeding policy threshold"
     elif composite.get("privacy", 0.0) >= priv_thresh:
@@ -624,8 +746,11 @@ def decision_router_node(state: GovernanceState) -> Dict[str, Any]:
     elif hitl_score >= 0.70 or len(hitl_reasons) > 0:
         action = "HUMAN_REVIEW"
         reason = hitl_reasons[0] if hitl_reasons else "Critical high-stakes action requiring human expert review"
+    elif composite.get("bias", 0.0) >= 0.80:
+        action = "BLOCK"
+        reason = "Severe bias or discriminatory content detected exceeding policy threshold"
     elif composite.get("bias", 0.0) >= bias_thresh:
-        action = "BLOCK" if composite.get("bias", 0.0) >= 0.80 else "FLAG"
+        action = "FLAG"
         reason = "Biased or discriminatory content detected exceeding policy threshold"
     elif composite.get("hallucination", 0.0) >= hallu_thresh:
         action = "HUMAN_REVIEW"
@@ -654,6 +779,7 @@ def decision_router_node(state: GovernanceState) -> Dict[str, Any]:
                 "bias": bias_thresh,
                 "hallucination": hallu_thresh,
                 "hitl_score": hitl_score,
+                "prohibited_score": prohibited_score,
             }
         }
     }
