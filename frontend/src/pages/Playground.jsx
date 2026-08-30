@@ -1,11 +1,16 @@
 import { useEffect, useMemo, useRef, useState } from "react"
+import ReactMarkdown from "react-markdown"
+import remarkGfm from "remark-gfm"
 
 import {
   AlertTriangle,
   CheckCircle2,
   ChevronRight,
   Clock3,
+  Cpu,
+  GitBranch,
   History as HistoryIcon,
+  Layers,
   Loader2,
   LockKeyhole,
   MessageSquare,
@@ -16,6 +21,7 @@ import {
   Sparkles,
   User,
   X,
+  Zap,
 } from "lucide-react"
 
 
@@ -595,61 +601,199 @@ function saveConversations(
 
 
 // ============================================================
+// LANGGRAPH WORKFLOW TRACE VISUALIZER
+// ============================================================
+
+function LangGraphWorkflowVisualizer({
+  trace = [],
+  latency = 0,
+  multiTurnRisk = null,
+}) {
+  const [expanded, setExpanded] = useState(true)
+
+  if (!trace || trace.length === 0) return null
+
+  return (
+    <div className="mt-3 overflow-hidden rounded-xl border border-slate-200 bg-slate-50/80 dark:border-slate-800 dark:bg-slate-900/50">
+      <button
+        type="button"
+        onClick={() => setExpanded(!expanded)}
+        className="flex w-full items-center justify-between px-3.5 py-2.5 text-left text-xs font-semibold text-slate-700 transition hover:bg-slate-100/70 dark:text-slate-200 dark:hover:bg-slate-800/60"
+      >
+        <div className="flex items-center gap-2">
+          <span className="flex h-2 w-2 rounded-full bg-violet-500 animate-pulse" />
+          <span className="font-mono text-[11px] text-violet-600 dark:text-violet-400">
+            LangGraph Execution Pipeline
+          </span>
+          <span className="rounded-md bg-slate-200/80 px-1.5 py-0.5 text-[9px] font-medium text-slate-600 dark:bg-slate-800 dark:text-slate-300">
+            {trace.length} nodes
+          </span>
+        </div>
+
+        <div className="flex items-center gap-2">
+          {latency > 0 && (
+            <span className="font-mono text-[10px] font-medium text-emerald-600 dark:text-emerald-400">
+              ⚡ {latency}ms
+            </span>
+          )}
+          <span className="text-[10px] text-slate-400">
+            {expanded ? "Collapse" : "Expand"}
+          </span>
+        </div>
+      </button>
+
+      {expanded && (
+        <div className="border-t border-slate-200/70 p-3 dark:border-slate-800/80">
+          <div className="relative space-y-2 before:absolute before:bottom-2 before:left-[11px] before:top-2 before:w-[2px] before:bg-slate-200 dark:before:bg-slate-800">
+            {trace.map((step, idx) => {
+              const isBlocked =
+                step.status === "BLOCK" || step.status === "BLOCKED"
+              const isWarning =
+                step.status === "WARNING" || step.status === "HUMAN_REVIEW"
+              const isPassed =
+                step.status === "PASSED" || step.status === "ALLOW"
+
+              const dotColor = isBlocked
+                ? "bg-red-500 ring-4 ring-red-100 dark:ring-red-950"
+                : isWarning
+                  ? "bg-amber-500 ring-4 ring-amber-100 dark:ring-amber-950"
+                  : isPassed
+                    ? "bg-emerald-500 ring-4 ring-emerald-100 dark:ring-emerald-950"
+                    : "bg-violet-500 ring-4 ring-violet-100 dark:ring-violet-950"
+
+              return (
+                <div key={idx} className="relative flex items-start gap-3 pl-1">
+                  <div
+                    className={`relative z-10 mt-1 h-2.5 w-2.5 shrink-0 rounded-full ${dotColor}`}
+                  />
+                  <div className="flex-1 rounded-lg border border-slate-200/60 bg-white p-2 text-xs shadow-xs dark:border-slate-800 dark:bg-slate-800/80">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="font-medium text-slate-800 dark:text-slate-100">
+                        {step.node_name}
+                      </span>
+                      <div className="flex items-center gap-1.5 font-mono text-[10px]">
+                        <span
+                          className={`rounded px-1.5 py-0.5 font-semibold uppercase ${
+                            isBlocked
+                              ? "bg-red-100 text-red-700 dark:bg-red-950 dark:text-red-300"
+                              : isWarning
+                                ? "bg-amber-100 text-amber-700 dark:bg-amber-950 dark:text-amber-300"
+                                : "bg-emerald-100 text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300"
+                          }`}
+                        >
+                          {step.status}
+                        </span>
+                        <span className="text-slate-400">
+                          {step.duration_ms}ms
+                        </span>
+                      </div>
+                    </div>
+
+                    {step.evidence && step.evidence.length > 0 && (
+                      <p className="mt-1 text-[11px] text-slate-500 dark:text-slate-400">
+                        {step.evidence.join(" • ")}
+                      </p>
+                    )}
+                  </div>
+                </div>
+              )
+            })}
+          </div>
+
+          {multiTurnRisk && multiTurnRisk.turns_analyzed > 0 && (
+            <div className="mt-3 flex items-center justify-between rounded-lg bg-violet-50 px-3 py-2 text-[11px] text-violet-800 dark:bg-violet-950/40 dark:text-violet-300">
+              <span className="font-medium">
+                Multi-Turn History Window:
+              </span>
+              <span className="font-mono">
+                {multiTurnRisk.turns_analyzed} turns (Compound Risk:{" "}
+                {Math.round(multiTurnRisk.score * 100)}%)
+              </span>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
+
+// ============================================================
 // GOVERNANCE CARD
 // ============================================================
 
-function GovernanceCard({
-  result,
-}) {
-  if (!result) return null
+function GovernanceCard({ result }) {
+  const decision = getDecision(result)
+  const category = result?._category || getPolicyCategory(result, result?._prompt)
+  const risk = result?.risk || result?.risk_scores || {}
+  const evidence = result?.evidence || {}
+  const trace = result?.workflow_trace || []
+  const multiTurnRisk = result?.multi_turn_risk || null
+  const latency = result?.latency_ms || 0
 
+  // ── Human Review state ────────────────────────────────────
+  const [reviewStatus, setReviewStatus] = useState(null) // null | 'approved' | 'rejected' | 'editing'
+  const [editText, setEditText] = useState("")
+  const [reviewLoading, setReviewLoading] = useState(false)
+  const [reviewError, setReviewError] = useState("")
 
-  const decision =
-    getDecision(result)
+  const interactionId =
+    result?.interaction_id ||
+    result?.id ||
+    result?.governance?.interaction_id ||
+    null
 
+  async function handleApprove() {
+    if (!interactionId) { setReviewError("No interaction ID found — cannot approve."); return }
+    setReviewLoading(true); setReviewError("")
+    try {
+      await apiRequest(`/api/human-review/${interactionId}/approve`, { method: "POST" })
+      setReviewStatus("approved")
+    } catch (e) {
+      setReviewError(e?.message || "Approval failed.")
+    } finally { setReviewLoading(false) }
+  }
 
-  const category =
-    getPolicyCategory(
-      result,
-      result?._prompt || ""
-    )
+  async function handleReject() {
+    if (!interactionId) { setReviewError("No interaction ID found — cannot reject."); return }
+    setReviewLoading(true); setReviewError("")
+    try {
+      await apiRequest(`/api/human-review/${interactionId}/reject`, { method: "POST" })
+      setReviewStatus("rejected")
+    } catch (e) {
+      setReviewError(e?.message || "Rejection failed.")
+    } finally { setReviewLoading(false) }
+  }
 
+  async function handleEditRelease() {
+    if (!interactionId) { setReviewError("No interaction ID found."); return }
+    setReviewLoading(true); setReviewError("")
+    try {
+      await apiRequest(`/api/human-review/${interactionId}/edit`, {
+        method: "POST",
+        body: JSON.stringify({ action: "ALLOW", comment: editText || "Edited and released by reviewer" }),
+      })
+      setReviewStatus("edited")
+    } catch (e) {
+      setReviewError(e?.message || "Edit & release failed.")
+    } finally { setReviewLoading(false) }
+  }
 
-  const blocked =
-    decision === "BLOCKED"
-
-
-  const review =
-    decision ===
-    "HUMAN_REVIEW"
-
-
-  const risk =
-    result?.risk ||
-    result?.risk_scores ||
-    {}
-
-
-  const evidence =
-    result?.evidence || {}
-
+  const blocked = decision === "BLOCKED" || decision === "BLOCK"
+  const review = decision === "HUMAN_REVIEW" || decision === "REVIEW"
 
   const categoryEvidence =
     category === "Privacy"
       ? evidence.privacy
       : category === "Security"
         ? evidence.security
-        : category ===
-            "Policy Safety"
+        : category === "Policy Safety"
           ? evidence.policy
-          : category ===
-              "Bias & Fairness"
+          : category === "Bias & Fairness"
             ? evidence.bias
-            : category ===
-                "Hallucination"
+            : category === "Hallucination"
               ? evidence.hallucination
               : []
-
 
   const reason =
     result?.decision_reason ||
@@ -659,30 +803,23 @@ function GovernanceCard({
     result?.response ||
     "Governance evaluation completed."
 
+  const border = blocked
+    ? "border-red-200 dark:border-red-900/60"
+    : review
+      ? "border-amber-200 dark:border-amber-900/60"
+      : "border-emerald-200 dark:border-emerald-900/60"
 
-  const border =
-    blocked
-      ? "border-red-200 dark:border-red-900/60"
-      : review
-        ? "border-amber-200 dark:border-amber-900/60"
-        : "border-emerald-200 dark:border-emerald-900/60"
+  const header = blocked
+    ? "bg-red-50 dark:bg-red-950/30"
+    : review
+      ? "bg-amber-50 dark:bg-amber-950/30"
+      : "bg-emerald-50 dark:bg-emerald-950/30"
 
-
-  const header =
-    blocked
-      ? "bg-red-50 dark:bg-red-950/30"
-      : review
-        ? "bg-amber-50 dark:bg-amber-950/30"
-        : "bg-emerald-50 dark:bg-emerald-950/30"
-
-
-  const title =
-    blocked
-      ? "text-red-700 dark:text-red-300"
-      : review
-        ? "text-amber-700 dark:text-amber-300"
-        : "text-emerald-700 dark:text-emerald-300"
-
+  const title = blocked
+    ? "text-red-700 dark:text-red-300"
+    : review
+      ? "text-amber-700 dark:text-amber-300"
+      : "text-emerald-700 dark:text-emerald-300"
 
   return (
     <div
@@ -697,22 +834,10 @@ function GovernanceCard({
         dark:bg-slate-900
       `}
     >
-
       {/* HEADER */}
-
-      <div
-        className={`
-          border-b
-          px-4
-          py-3
-          ${header}
-        `}
-      >
-
+      <div className={`border-b px-4 py-3 ${header}`}>
         <div className="flex items-center justify-between gap-3">
-
           <div className="flex items-center gap-2.5">
-
             {blocked ? (
               <LockKeyhole
                 size={16}
@@ -731,28 +856,14 @@ function GovernanceCard({
             )}
 
             <div>
-
               <p className="text-[9px] font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400">
                 Governance decision
               </p>
-
-              <p
-                className={`
-                  text-sm
-                  font-bold
-                  ${title}
-                `}
-              >
-                {decision ===
-                "HUMAN_REVIEW"
-                  ? "HUMAN REVIEW"
-                  : decision}
+              <p className={`text-sm font-bold ${title}`}>
+                {decision === "HUMAN_REVIEW" ? "HUMAN REVIEW" : decision}
               </p>
-
             </div>
-
           </div>
-
 
           <span
             className={`
@@ -774,23 +885,12 @@ function GovernanceCard({
           >
             {category}
           </span>
-
         </div>
-
       </div>
 
-
       {/* BODY */}
-
       <div className="p-4">
-
-        <p
-          className={`
-            text-xs
-            leading-5
-            ${title}
-          `}
-        >
+        <p className={`text-xs leading-5 ${title}`}>
           {blocked
             ? `This interaction was blocked because it triggered the ${category.toLowerCase()} governance policy.`
             : review
@@ -798,119 +898,194 @@ function GovernanceCard({
               : "This interaction passed the governance checks."}
         </p>
 
-
         {/* REASON */}
-
         <div className="mt-3 rounded-lg border border-slate-200 bg-slate-50 p-3 dark:border-slate-700 dark:bg-slate-800/60">
-
           <p className="text-[9px] font-semibold uppercase tracking-wider text-slate-400">
             Evaluation details
           </p>
-
           <p className="mt-1 text-xs leading-5 text-slate-600 dark:text-slate-300">
             {String(reason)}
           </p>
-
         </div>
 
+        {/* HUMAN-IN-THE-LOOP ACTION PANEL */}
+        {review && (
+          <div style={{ marginTop: "12px", borderRadius: "10px", border: "1px solid #fbbf24", background: "#fffbeb", padding: "14px" }}>
+            <p style={{ fontSize: "9px", fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.08em", color: "#92400e", marginBottom: "10px" }}>
+              Reviewer Actions
+            </p>
+
+            {/* RESOLVED STATE */}
+            {reviewStatus === "approved" && (
+              <div style={{ display: "flex", alignItems: "center", gap: "8px", background: "#d1fae5", borderRadius: "8px", padding: "10px 12px" }}>
+                <CheckCircle2 size={14} style={{ color: "#059669" }} />
+                <span style={{ fontSize: "12px", fontWeight: 600, color: "#065f46" }}>Approved — interaction released to user.</span>
+              </div>
+            )}
+            {reviewStatus === "rejected" && (
+              <div style={{ display: "flex", alignItems: "center", gap: "8px", background: "#fee2e2", borderRadius: "8px", padding: "10px 12px" }}>
+                <LockKeyhole size={14} style={{ color: "#dc2626" }} />
+                <span style={{ fontSize: "12px", fontWeight: 600, color: "#991b1b" }}>Rejected — interaction blocked.</span>
+              </div>
+            )}
+            {reviewStatus === "edited" && (
+              <div style={{ display: "flex", alignItems: "center", gap: "8px", background: "#d1fae5", borderRadius: "8px", padding: "10px 12px" }}>
+                <CheckCircle2 size={14} style={{ color: "#059669" }} />
+                <span style={{ fontSize: "12px", fontWeight: 600, color: "#065f46" }}>Edited & released — updated response sent.</span>
+              </div>
+            )}
+
+            {/* ACTION BUTTONS */}
+            {!reviewStatus && (
+              <>
+                <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
+                  {/* APPROVE */}
+                  <button
+                    onClick={handleApprove}
+                    disabled={reviewLoading}
+                    style={{
+                      display: "flex", alignItems: "center", gap: "6px",
+                      padding: "7px 14px", borderRadius: "8px", border: "none", cursor: "pointer",
+                      background: "#059669", color: "#fff", fontSize: "12px", fontWeight: 700,
+                      opacity: reviewLoading ? 0.6 : 1,
+                    }}
+                  >
+                    <CheckCircle2 size={13} />
+                    {reviewLoading ? "Processing…" : "Approve & Release"}
+                  </button>
+
+                  {/* REJECT */}
+                  <button
+                    onClick={handleReject}
+                    disabled={reviewLoading}
+                    style={{
+                      display: "flex", alignItems: "center", gap: "6px",
+                      padding: "7px 14px", borderRadius: "8px", border: "none", cursor: "pointer",
+                      background: "#dc2626", color: "#fff", fontSize: "12px", fontWeight: 700,
+                      opacity: reviewLoading ? 0.6 : 1,
+                    }}
+                  >
+                    <LockKeyhole size={13} />
+                    {reviewLoading ? "Processing…" : "Reject & Block"}
+                  </button>
+
+                  {/* TOGGLE EDIT */}
+                  <button
+                    onClick={() => setReviewStatus(reviewStatus === "editing" ? null : "editing")}
+                    disabled={reviewLoading}
+                    style={{
+                      display: "flex", alignItems: "center", gap: "6px",
+                      padding: "7px 14px", borderRadius: "8px", cursor: "pointer",
+                      background: "transparent", border: "1.5px solid #d97706", color: "#d97706",
+                      fontSize: "12px", fontWeight: 700, opacity: reviewLoading ? 0.6 : 1,
+                    }}
+                  >
+                    <Sparkles size={13} />
+                    Edit & Release
+                  </button>
+                </div>
+
+                {/* EDIT AREA */}
+                {reviewStatus === "editing" && (
+                  <div style={{ marginTop: "10px" }}>
+                    <textarea
+                      rows={3}
+                      placeholder="Write an edited safe response for the user, then click Release…"
+                      value={editText}
+                      onChange={(e) => setEditText(e.target.value)}
+                      style={{
+                        width: "100%", borderRadius: "8px", border: "1px solid #fcd34d",
+                        padding: "8px 10px", fontSize: "12px", resize: "vertical",
+                        background: "#fff", color: "#1e293b", outline: "none", boxSizing: "border-box",
+                      }}
+                    />
+                    <button
+                      onClick={handleEditRelease}
+                      disabled={reviewLoading}
+                      style={{
+                        marginTop: "8px", padding: "7px 16px", borderRadius: "8px",
+                        background: "#d97706", color: "#fff", border: "none",
+                        fontSize: "12px", fontWeight: 700, cursor: "pointer",
+                        opacity: reviewLoading ? 0.6 : 1,
+                      }}
+                    >
+                      {reviewLoading ? "Releasing…" : "Confirm & Release"}
+                    </button>
+                  </div>
+                )}
+              </>
+            )}
+
+            {/* ERROR */}
+            {reviewError && (
+              <p style={{ marginTop: "8px", fontSize: "11px", color: "#dc2626" }}>{reviewError}</p>
+            )}
+          </div>
+        )}
 
         {/* EVIDENCE */}
+        {Array.isArray(categoryEvidence) && categoryEvidence.length > 0 && (
 
-        {Array.isArray(
-          categoryEvidence
-        ) &&
-          categoryEvidence.length >
-            0 && (
-            <div className="mt-3">
-
-              <p className="text-[9px] font-semibold uppercase tracking-wider text-slate-400">
-                Detected evidence
-              </p>
-
-              <div className="mt-2 flex flex-wrap gap-1.5">
-
-                {categoryEvidence.map(
-                  (
-                    item,
-                    index
-                  ) => (
-                    <span
-                      key={`${item}-${index}`}
-                      className={`
-                        rounded-full
-                        px-2
-                        py-1
-                        text-[9px]
-                        font-medium
-                        ${
-                          blocked
-                            ? "bg-red-100 text-red-700 dark:bg-red-950/60 dark:text-red-300"
-                            : "bg-slate-100 text-slate-700 dark:bg-slate-800 dark:text-slate-300"
-                        }
-                      `}
-                    >
-                      {String(item)}
-                    </span>
-                  )
-                )}
-
-              </div>
-
+          <div className="mt-3">
+            <p className="text-[9px] font-semibold uppercase tracking-wider text-slate-400">
+              Detected evidence
+            </p>
+            <div className="mt-2 flex flex-wrap gap-1.5">
+              {categoryEvidence.map((item, index) => (
+                <span
+                  key={`${item}-${index}`}
+                  className={`
+                    rounded-full
+                    px-2
+                    py-1
+                    text-[9px]
+                    font-medium
+                    ${
+                      blocked
+                        ? "bg-red-100 text-red-700 dark:bg-red-950/60 dark:text-red-300"
+                        : "bg-slate-100 text-slate-700 dark:bg-slate-800 dark:text-slate-300"
+                    }
+                  `}
+                >
+                  {String(item)}
+                </span>
+              ))}
             </div>
-          )}
+          </div>
+        )}
 
+        {/* LANGGRAPH WORKFLOW TRACE */}
+        {trace && trace.length > 0 && (
+          <LangGraphWorkflowVisualizer
+            trace={trace}
+            latency={latency}
+            multiTurnRisk={multiTurnRisk}
+          />
+        )}
 
         {/* RISK SCORES */}
-
         <div className="mt-3 grid grid-cols-5 gap-1.5">
-
           {[
-            [
-              "Privacy",
-              risk.privacy,
-            ],
-            [
-              "Security",
-              risk.security,
-            ],
-            [
-              "Policy",
-              risk.policy,
-            ],
-            [
-              "Bias",
-              risk.bias,
-            ],
-            [
-              "Halluc.",
-              risk.hallucination,
-            ],
-          ].map(
-            ([label, value]) => (
-              <div
-                key={label}
-                className="rounded-lg bg-slate-50 p-2 dark:bg-slate-800/70"
-              >
-                <p className="text-[8px] font-semibold uppercase tracking-wide text-slate-400">
-                  {label}
-                </p>
-
-                <p className="mt-1 text-[11px] font-semibold text-slate-700 dark:text-slate-200">
-                  {Math.round(
-                    Number(
-                      value || 0
-                    ) * 100
-                  )}
-                  %
-                </p>
-              </div>
-            )
-          )}
-
+            ["Privacy", risk.privacy],
+            ["Security", risk.security],
+            ["Policy", risk.policy],
+            ["Bias", risk.bias],
+            ["Halluc.", risk.hallucination],
+          ].map(([label, value]) => (
+            <div
+              key={label}
+              className="rounded-lg bg-slate-50 p-2 dark:bg-slate-800/70"
+            >
+              <p className="text-[8px] font-semibold uppercase tracking-wide text-slate-400">
+                {label}
+              </p>
+              <p className="mt-1 text-[11px] font-semibold text-slate-700 dark:text-slate-200">
+                {Math.round(Number(value || 0) * 100)}%
+              </p>
+            </div>
+          ))}
         </div>
-
       </div>
-
     </div>
   )
 }
@@ -988,9 +1163,44 @@ function ChatMessage({
             }
           `}
         >
-          <p className="whitespace-pre-wrap">
-            {item.content}
-          </p>
+          {isUser ? (
+            <p className="whitespace-pre-wrap">{item.content}</p>
+          ) : (
+            <ReactMarkdown
+              remarkPlugins={[remarkGfm]}
+              components={{
+                h1: ({ children }) => <h1 style={{ fontSize: "1.15em", fontWeight: 700, marginBottom: "0.5em", marginTop: "0.75em" }}>{children}</h1>,
+                h2: ({ children }) => <h2 style={{ fontSize: "1.05em", fontWeight: 700, marginBottom: "0.4em", marginTop: "0.65em" }}>{children}</h2>,
+                h3: ({ children }) => <h3 style={{ fontSize: "0.97em", fontWeight: 700, marginBottom: "0.35em", marginTop: "0.55em", color: "#7c3aed" }}>{children}</h3>,
+                p: ({ children }) => <p style={{ marginBottom: "0.6em", lineHeight: 1.65 }}>{children}</p>,
+                strong: ({ children }) => <strong style={{ fontWeight: 700 }}>{children}</strong>,
+                em: ({ children }) => <em style={{ fontStyle: "italic" }}>{children}</em>,
+                ul: ({ children }) => <ul style={{ paddingLeft: "1.3em", marginBottom: "0.6em", listStyleType: "disc" }}>{children}</ul>,
+                ol: ({ children }) => <ol style={{ paddingLeft: "1.3em", marginBottom: "0.6em", listStyleType: "decimal" }}>{children}</ol>,
+                li: ({ children }) => <li style={{ marginBottom: "0.2em", lineHeight: 1.6 }}>{children}</li>,
+                hr: () => <hr style={{ margin: "0.75em 0", borderColor: "#e2e8f0" }} />,
+                code: ({ inline, children }) =>
+                  inline ? (
+                    <code style={{ background: "#f1f5f9", borderRadius: "4px", padding: "1px 5px", fontSize: "0.85em", fontFamily: "monospace", color: "#7c3aed" }}>{children}</code>
+                  ) : (
+                    <pre style={{ background: "#f8fafc", border: "1px solid #e2e8f0", borderRadius: "8px", padding: "0.75em 1em", overflowX: "auto", marginBottom: "0.6em" }}>
+                      <code style={{ fontSize: "0.82em", fontFamily: "monospace" }}>{children}</code>
+                    </pre>
+                  ),
+                table: ({ children }) => (
+                  <div style={{ overflowX: "auto", marginBottom: "0.75em" }}>
+                    <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "0.85em" }}>{children}</table>
+                  </div>
+                ),
+                thead: ({ children }) => <thead style={{ background: "#f1f5f9" }}>{children}</thead>,
+                th: ({ children }) => <th style={{ padding: "6px 12px", textAlign: "left", fontWeight: 700, borderBottom: "2px solid #e2e8f0", whiteSpace: "nowrap" }}>{children}</th>,
+                td: ({ children }) => <td style={{ padding: "5px 12px", borderBottom: "1px solid #e2e8f0" }}>{children}</td>,
+                blockquote: ({ children }) => <blockquote style={{ borderLeft: "3px solid #7c3aed", paddingLeft: "0.8em", color: "#64748b", marginBottom: "0.6em", fontStyle: "italic" }}>{children}</blockquote>,
+              }}
+            >
+              {item.content}
+            </ReactMarkdown>
+          )}
         </div>
 
 
@@ -1663,47 +1873,26 @@ function Playground() {
     conversationMessages,
     applicationId,
   }) {
+    const history = (conversationMessages || [])
+      .slice(-10)
+      .map((m) => ({
+        role: m.role || (m.type === "user" ? "user" : "assistant"),
+        content: m.content || m.text || m.prompt || "",
+      }))
+      .filter((m) => m.content)
 
-    /*
-     * CURRENT IMPLEMENTATION
-     *
-     * Your existing backend evaluates the prompt.
-     */
-
-    const data =
-      await apiRequest(
-        "/api/chat",
-        {
-          method: "POST",
-
-          body: JSON.stringify({
-            app_id:
-              applicationId,
-
-            application_id:
-              applicationId,
-
-            prompt,
-
-            message: prompt,
-
-            /*
-             * This is intentionally included now.
-             *
-             * Your current backend can ignore it.
-             *
-             * When your partner integrates the AI,
-             * this becomes the conversation context.
-             */
-
-            conversation: conversationMessages,
-
-            messages:
-              conversationMessages,
-          }),
-        }
-      )
-
+    const data = await apiRequest("/api/chat", {
+      method: "POST",
+      body: JSON.stringify({
+        app_id: applicationId,
+        application_id: applicationId,
+        prompt,
+        message: prompt,
+        history,
+        conversation: conversationMessages,
+        messages: conversationMessages,
+      }),
+    })
 
     return data
   }
@@ -1727,36 +1916,11 @@ function Playground() {
     }
 
 
-    const token =
-      getToken()
-
-
-    if (!token) {
-
-      setError(
-        "You are not signed in. Please sign in again."
-      )
-
-      return
-
-    }
-
-
     const applicationId =
       selectedApplication?.id ||
       selectedApplication?.application_id ||
-      null
-
-
-    if (!applicationId) {
-
-      setError(
-        "No AI application is available."
-      )
-
-      return
-
-    }
+      applications?.[0]?.id ||
+      "app-001"
 
 
     const conversationId =

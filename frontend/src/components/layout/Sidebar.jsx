@@ -4,18 +4,13 @@ import {
   FileCog,
   LayoutDashboard,
   Network,
-  Settings2,
   Shield,
-  LogOut,
   PanelLeftClose,
   PanelLeftOpen,
 } from "lucide-react"
 
 import { useState } from "react"
 import { useNavigate, useLocation } from "react-router-dom"
-
-import { signOut } from "firebase/auth"
-import { auth } from "../../services/firebase"
 
 
 const navigation = [
@@ -54,55 +49,14 @@ function Sidebar({
   const navigate = useNavigate()
   const location = useLocation()
 
-  const [accountOpen, setAccountOpen] = useState(false)
-  const [signingOut, setSigningOut] = useState(false)
-
-
   // ==========================================================
-  // USER
+  // USER DETAILS
   // ==========================================================
 
-  let user = null
-
-  try {
-    const storedUser =
-      localStorage.getItem("controlpanel_user")
-
-    if (storedUser) {
-      user = JSON.parse(storedUser)
-    }
-  } catch {
-    user = null
-  }
-
-
-  const userName =
-    user?.displayName ||
-    user?.name ||
-    "User"
-
-  const userEmail =
-    user?.email ||
-    ""
-
-  const photoURL =
-    user?.photoURL ||
-    user?.picture ||
-    null
-
-
-  const initials =
-    userName
-      .split(" ")
-      .filter(Boolean)
-      .slice(0, 2)
-      .map(
-        (word) =>
-          word.charAt(0)
-      )
-      .join("")
-      .toUpperCase() ||
-    "U"
+  const userName = "Enterprise Admin"
+  const userEmail = "admin@controlplane.ai"
+  const photoURL = null
+  const initials = "EA"
 
 
   // ==========================================================
@@ -123,60 +77,7 @@ function Sidebar({
   // ==========================================================
 
   function toggleSidebar() {
-    setCollapsed((current) => {
-      const next = !current
-
-      // Close account menu when collapsing
-      if (next) {
-        setAccountOpen(false)
-      }
-
-      return next
-    })
-  }
-
-
-  // ==========================================================
-  // SIGN OUT
-  // ==========================================================
-
-  async function handleSignOut() {
-    if (signingOut) {
-      return
-    }
-
-    setSigningOut(true)
-
-    try {
-      await signOut(auth)
-    } catch (error) {
-      console.error(
-        "Firebase sign out:",
-        error
-      )
-    }
-
-    localStorage.removeItem(
-      "controlpanel_token"
-    )
-
-    localStorage.removeItem(
-      "controlpanel_user"
-    )
-
-    sessionStorage.removeItem(
-      "controlpanel_token"
-    )
-
-    sessionStorage.removeItem(
-      "controlpanel_user"
-    )
-
-    navigate("/signin", {
-      replace: true,
-    })
-
-    setSigningOut(false)
+    setCollapsed((current) => !current)
   }
 
 
@@ -428,104 +329,7 @@ function Sidebar({
 
 
       {/* =====================================================
-          ACCOUNT POPUP
-      ===================================================== */}
-
-      {accountOpen && (
-        <div
-          className={`
-            absolute
-            bottom-[75px]
-            z-[70]
-            w-[226px]
-            overflow-hidden
-            rounded-xl
-            border
-            border-slate-700
-            bg-[#111827]
-            shadow-2xl
-
-            ${
-              collapsed
-                ? "left-[65px]"
-                : "left-3"
-            }
-          `}
-        >
-
-          {/* USER DETAILS */}
-
-          <div
-            className="
-              border-b
-              border-slate-700
-              px-4
-              py-3
-            "
-          >
-
-            <p
-              className="
-                truncate
-                text-xs
-                font-medium
-                text-white
-              "
-            >
-              {userName}
-            </p>
-
-
-            {userEmail && (
-              <p
-                className="
-                  mt-1
-                  truncate
-                  text-[10px]
-                  text-slate-500
-                "
-              >
-                {userEmail}
-              </p>
-            )}
-
-          </div>
-
-
-          {/* SIGN OUT */}
-
-          <button
-            type="button"
-            onClick={handleSignOut}
-            disabled={signingOut}
-            className="
-              flex
-              w-full
-              items-center
-              gap-3
-              px-4
-              py-3
-              text-left
-              text-xs
-              text-red-400
-              hover:bg-red-500/10
-            "
-          >
-
-            <LogOut size={15} />
-
-            {signingOut
-              ? "Signing out..."
-              : "Sign out"}
-
-          </button>
-
-        </div>
-      )}
-
-
-      {/* =====================================================
-          USER
+          USER BADGE (Auth-free mode)
       ===================================================== */}
 
       <div
@@ -537,13 +341,7 @@ function Sidebar({
         "
       >
 
-        <button
-          type="button"
-          onClick={() =>
-            setAccountOpen(
-              (open) => !open
-            )
-          }
+        <div
           title={
             collapsed
               ? userName
@@ -556,7 +354,6 @@ function Sidebar({
             rounded-lg
             py-3
             text-left
-            hover:bg-white/5
 
             ${
               collapsed
@@ -568,90 +365,55 @@ function Sidebar({
 
           {/* AVATAR */}
 
-          {photoURL ? (
-
-            <img
-              src={photoURL}
-              alt={userName}
-              className="
-                h-8
-                w-8
-                shrink-0
-                rounded-full
-                object-cover
-              "
-            />
-
-          ) : (
-
-            <div
-              className="
-                flex
-                h-8
-                w-8
-                shrink-0
-                items-center
-                justify-center
-                rounded-full
-                bg-slate-700
-                text-[10px]
-                font-semibold
-              "
-            >
-              {initials}
-            </div>
-
-          )}
+          <div
+            className="
+              flex
+              h-8
+              w-8
+              shrink-0
+              items-center
+              justify-center
+              rounded-full
+              bg-violet-600
+              text-[10px]
+              font-semibold
+              text-white
+            "
+          >
+            {initials}
+          </div>
 
 
           {/* USER INFO */}
 
           {!collapsed && (
-            <>
-              <div className="min-w-0 flex-1">
+            <div className="min-w-0 flex-1">
 
-                <p
-                  className="
-                    truncate
-                    text-xs
-                    font-medium
-                    text-white
-                  "
-                >
-                  {userName}
-                </p>
+              <p
+                className="
+                  truncate
+                  text-xs
+                  font-medium
+                  text-white
+                "
+              >
+                {userName}
+              </p>
 
-                <p
-                  className="
-                    truncate
-                    text-[10px]
-                    text-slate-500
-                  "
-                >
-                  Governance Admin
-                </p>
+              <p
+                className="
+                  truncate
+                  text-[10px]
+                  text-emerald-400
+                "
+              >
+                ● System Active
+              </p>
 
-              </div>
-
-
-              <Settings2
-                size={14}
-                className={`
-                  shrink-0
-                  text-slate-500
-                  transition-transform
-
-                  ${
-                    accountOpen
-                      ? "rotate-90 text-violet-400"
-                      : ""
-                  }
-                `}
-              />
-            </>
+            </div>
           )}
 
-        </button>
+        </div>
 
       </div>
 

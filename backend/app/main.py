@@ -7,16 +7,14 @@ import hashlib
 from pathlib import Path
 from typing import Optional, Dict, Any, List, Tuple
 
-import firebase_admin
-from firebase_admin import credentials
-from firebase_admin import auth as firebase_auth
-
 from fastapi import FastAPI, Depends, HTTPException, Header
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from sqlalchemy import create_engine, text, inspect
 from sqlalchemy.orm import sessionmaker, Session
+
+from app.checker.graph import run_governance_pipeline
 
 
 # ============================================================
@@ -70,18 +68,6 @@ def ensure_schema() -> None:
     # This is non-destructive: existing tables and data are preserved.
     with engine.begin() as conn:
         conn.execute(text("""
-            CREATE TABLE IF NOT EXISTS users (
-                id VARCHAR PRIMARY KEY,
-                email VARCHAR NOT NULL UNIQUE,
-                name VARCHAR NOT NULL,
-                role VARCHAR DEFAULT 'ADMIN',
-                password_hash VARCHAR,
-                google_sub VARCHAR,
-                picture VARCHAR DEFAULT ''
-            )
-        """))
-
-        conn.execute(text("""
             CREATE TABLE IF NOT EXISTS applications (
                 id VARCHAR PRIMARY KEY,
                 owner_id VARCHAR,
@@ -108,6 +94,41 @@ def ensure_schema() -> None:
                 privacy_threshold FLOAT DEFAULT 0.80,
                 security_threshold FLOAT DEFAULT 0.80,
                 policy_threshold FLOAT DEFAULT 0.70
+            )
+        """))
+
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS interactions (
+                id VARCHAR PRIMARY KEY,
+                application_id VARCHAR,
+                app_id VARCHAR,
+                user_id VARCHAR,
+                prompt TEXT,
+                message TEXT,
+                response TEXT,
+                decision VARCHAR DEFAULT 'ALLOW'
+            )
+        """))
+
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS risk_assessments (
+                interaction_id VARCHAR PRIMARY KEY,
+                privacy FLOAT DEFAULT 0,
+                hallucination FLOAT DEFAULT 0,
+                bias FLOAT DEFAULT 0,
+                security FLOAT DEFAULT 0,
+                policy FLOAT DEFAULT 0,
+                overall FLOAT DEFAULT 0,
+                evidence TEXT DEFAULT ''
+            )
+        """))
+
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS decisions (
+                interaction_id VARCHAR PRIMARY KEY,
+                action VARCHAR DEFAULT 'ALLOW',
+                reason TEXT DEFAULT '',
+                status VARCHAR DEFAULT 'RESOLVED'
             )
         """))
 
@@ -203,35 +224,6 @@ ensure_schema()
 
 
 # ============================================================
-# FIREBASE
-# ============================================================
-
-def find_firebase_key():
-    configured = os.getenv("FIREBASE_SERVICE_ACCOUNT")
-    if configured and os.path.exists(configured):
-        return configured
-
-    candidates = [
-        BASE_DIR / "firebase-service-account.json",
-        *sorted(BASE_DIR.glob("*-firebase-adminsdk-*.json")),
-    ]
-
-    for candidate in candidates:
-        if candidate.exists():
-            return str(candidate)
-
-    return None
-
-
-FIREBASE_KEY_PATH = find_firebase_key()
-
-if FIREBASE_KEY_PATH and not firebase_admin._apps:
-    firebase_admin.initialize_app(
-        credentials.Certificate(FIREBASE_KEY_PATH)
-    )
-
-
-# ============================================================
 # APP
 # ============================================================
 
@@ -262,20 +254,38 @@ class InteractionRequest(BaseModel):
     appId: Optional[str] = None
     applicationId: Optional[str] = None
 
-    # Accepted for compatibility, but never trusted for ownership.
     user_id: Optional[str] = None
+    session_id: Optional[str] = None
 
     prompt: Optional[str] = None
     message: Optional[str] = None
     text: Optional[str] = None
     content: Optional[str] = None
 
+    ai_response: Optional[str] = None
+    context_docs: Optional[List[str]] = None
+    history: Optional[List[Dict[str, str]]] = None
 
-class GoogleLoginRequest(BaseModel):
-    credential: str
+
+class PolicyCreate(BaseModel):
+    name: str
+    description: Optional[str] = ""
+    application_id: Optional[str] = None
+    pii_action: Optional[str] = "BLOCK"
+    hallucination_threshold: Optional[float] = 0.70
+    bias_threshold: Optional[float] = 0.60
+    injection_action: Optional[str] = "BLOCK"
+    human_review_threshold: Optional[float] = 0.75
+    privacy_threshold: Optional[float] = 0.80
+    security_threshold: Optional[float] = 0.80
+    policy_threshold: Optional[float] = 0.70
+    active: Optional[bool] = True
+    version: Optional[str] = "1.0"
 
 
 class PolicyUpdate(BaseModel):
+    name: Optional[str] = None
+    description: Optional[str] = None
     pii_action: Optional[str] = None
     hallucination_threshold: Optional[float] = None
     bias_threshold: Optional[float] = None
@@ -284,6 +294,7 @@ class PolicyUpdate(BaseModel):
     privacy_threshold: Optional[float] = None
     security_threshold: Optional[float] = None
     policy_threshold: Optional[float] = None
+    active: Optional[bool] = None
 
 
 class ReviewRequest(BaseModel):
@@ -383,104 +394,35 @@ def rows(db: Session, query: str, params=None):
 
 
 # ============================================================
-# AUTH HELPERS
-# ============================================================
-
-def serialize_user(user):
-    return {
-        "id": user["id"],
-        "email": user["email"],
-        "name": user["name"],
-        "role": user.get("role") or "ADMIN",
-        "picture": user.get("picture") or "",
-        "google_sub": user.get("google_sub") or "",
-    }
-
-
-def create_session(db: Session, user_id: str):
-    token = secrets.token_urlsafe(48)
-    db.execute(
-        text(
-            "INSERT INTO sessions (token, user_id) "
-            "VALUES (:token, :user_id)"
-        ),
-        {"token": token, "user_id": user_id},
-    )
-    db.commit()
-    return token
-
-
-def get_current_user(
-    authorization=Header(default=None),
-    db: Session = Depends(get_db),
-):
-    if not authorization or not authorization.startswith("Bearer "):
-        raise HTTPException(
-            status_code=401,
-            detail="Authentication required",
-        )
-
-    token = authorization.split(" ", 1)[1].strip()
-
-    if not token:
-        raise HTTPException(
-            status_code=401,
-            detail="Authentication required",
-        )
-
-    user = row(
-        db,
-        """
-        SELECT u.*
-        FROM users u
-        JOIN sessions s ON s.user_id = u.id
-        WHERE s.token = :token
-        LIMIT 1
-        """,
-        {"token": token},
-    )
-
-    if not user:
-        raise HTTPException(
-            status_code=401,
-            detail="Invalid or expired session",
-        )
-
-    return user
-
-
-# ============================================================
 # WORKSPACE
 # ============================================================
 
-def seed_workspace_for_user(db: Session, user_id: str):
+def seed_workspace(db: Session):
     apps = rows(
         db,
         """
         SELECT *
         FROM applications
-        WHERE owner_id = :owner_id
         ORDER BY id
         """,
-        {"owner_id": user_id},
     )
 
     if not apps:
         app_rows = [
             (
-                f"{user_id}-app-001",
+                "app-001",
                 "Customer Support AI",
                 "AI assistant for customer support conversations",
                 "Customer Support",
             ),
             (
-                f"{user_id}-app-002",
+                "app-002",
                 "HR Assistant",
                 "Internal HR question answering assistant",
                 "Human Resources",
             ),
             (
-                f"{user_id}-app-003",
+                "app-003",
                 "Document Analyzer",
                 "AI system for analyzing business documents",
                 "Document Intelligence",
@@ -493,7 +435,7 @@ def seed_workspace_for_user(db: Session, user_id: str):
                 "applications",
                 {
                     "id": app_id,
-                    "owner_id": user_id,
+                    "owner_id": "admin",
                     "name": name,
                     "description": description,
                     "category": category,
@@ -507,46 +449,28 @@ def seed_workspace_for_user(db: Session, user_id: str):
         """
         SELECT *
         FROM applications
-        WHERE owner_id = :owner_id
         ORDER BY id
         """,
-        {"owner_id": user_id},
     )
 
-    default_app_id = apps[0]["id"]
+    default_app_id = apps[0]["id"] if apps else "app-001"
 
     policies = rows(
         db,
         """
         SELECT *
         FROM policies
-        WHERE owner_id = :owner_id
         ORDER BY id
         """,
-        {"owner_id": user_id},
     )
 
-    if policies:
-        for policy in policies:
-            if not policy.get("application_id"):
-                db.execute(
-                    text(
-                        "UPDATE policies "
-                        "SET application_id = :app_id "
-                        "WHERE id = :id"
-                    ),
-                    {
-                        "app_id": default_app_id,
-                        "id": policy["id"],
-                    },
-                )
-    else:
+    if not policies:
         insert_compatible(
             db,
             "policies",
             {
-                "id": f"{user_id}-pol-001",
-                "owner_id": user_id,
+                "id": "pol-001",
+                "owner_id": "admin",
                 "application_id": default_app_id,
                 "name": "PII Protection",
                 "description": "Detect and protect personally identifiable information.",
@@ -567,8 +491,8 @@ def seed_workspace_for_user(db: Session, user_id: str):
             db,
             "policies",
             {
-                "id": f"{user_id}-pol-002",
-                "owner_id": user_id,
+                "id": "pol-002",
+                "owner_id": "admin",
                 "application_id": default_app_id,
                 "name": "HR Strict",
                 "description": "Strict governance policy for HR applications.",
@@ -585,7 +509,7 @@ def seed_workspace_for_user(db: Session, user_id: str):
             },
         )
 
-    db.commit()
+        db.commit()
 
 
 # ============================================================
@@ -1027,11 +951,18 @@ def calculate_decision(
 # INTERACTION SERIALIZATION
 # ============================================================
 
+# ============================================================
+# INTERACTION SERIALIZATION
+# ============================================================
+
 def serialize_interaction(
     interaction,
     risk=None,
     decision=None,
     evidence=None,
+    workflow_trace=None,
+    multi_turn_risk=None,
+    latency_ms=None,
 ):
     risk_data = {
         "privacy": float(risk.get("privacy") or 0) if risk else 0.0,
@@ -1064,30 +995,33 @@ def serialize_interaction(
         "risk": risk_data,
         "risk_scores": risk_data,
         "overall_risk": risk_data["overall"],
+        "multi_turn_risk": multi_turn_risk or {"score": 0.0, "turns_analyzed": 0, "evidence": []},
         "decision": action,
         "action": action,
         "decision_reason": reason,
         "reason": reason,
         "status": status,
+        "workflow_trace": workflow_trace or [],
+        "latency_ms": latency_ms or 0.0,
         "evidence": evidence or {
             "privacy": [],
             "hallucination": [],
             "bias": [],
             "security": [],
             "policy": [],
+            "multi_turn": [],
         },
         "reasons": [reason] if reason else [],
     }
 
 
 # ============================================================
-# INTERACTION ENGINE
+# INTERACTION ENGINE (LangGraph Powered)
 # ============================================================
 
 def process_interaction(
     payload: InteractionRequest,
     db: Session,
-    current_user,
 ):
     app_id = (
         payload.app_id
@@ -1104,10 +1038,11 @@ def process_interaction(
     )
 
     if not app_id:
-        raise HTTPException(
-            status_code=400,
-            detail="app_id or application_id is required",
-        )
+        first_app = row(db, "SELECT * FROM applications ORDER BY id LIMIT 1")
+        if first_app:
+            app_id = first_app["id"]
+        else:
+            app_id = "app-001"
 
     if not prompt:
         raise HTTPException(
@@ -1123,10 +1058,10 @@ def process_interaction(
             detail="Prompt cannot be empty",
         )
 
-    if len(prompt) > 2000:
+    if len(prompt) > 4000:
         raise HTTPException(
             status_code=400,
-            detail="Prompt cannot exceed 2000 characters",
+            detail="Prompt cannot exceed 4000 characters",
         )
 
     application = row(
@@ -1135,45 +1070,66 @@ def process_interaction(
         SELECT *
         FROM applications
         WHERE id = :id
-          AND owner_id = :owner_id
         LIMIT 1
         """,
-        {"id": app_id, "owner_id": current_user["id"]},
+        {"id": app_id},
     )
 
     if not application:
-        raise HTTPException(
-            status_code=404,
-            detail=f"Application not found: {app_id}",
+        application = row(db, "SELECT * FROM applications ORDER BY id LIMIT 1")
+        if application:
+            app_id = application["id"]
+        else:
+            application = {"name": "AI Application", "id": app_id}
+
+    # Fetch active policy for this application from database
+    policy_row = row(
+        db,
+        """
+        SELECT *
+        FROM policies
+        WHERE application_id = :app_id AND active = 1
+        ORDER BY id
+        LIMIT 1
+        """,
+        {"app_id": app_id},
+    )
+
+    if not policy_row:
+        policy_row = row(
+            db,
+            """
+            SELECT *
+            FROM policies
+            ORDER BY id
+            LIMIT 1
+            """,
         )
 
-    risk, evidence = evaluate_prompt(prompt)
-    action, reason = calculate_decision(risk)
+    policy_dict = dict(policy_row) if policy_row else {}
+    policy_dict["name"] = application.get("name", "Enterprise AI")
 
-    if action == "BLOCK":
-        response_text = (
-            "This request was blocked because it violates "
-            "the application's governance policy."
-        )
-    elif action == "HUMAN_REVIEW":
-        response_text = (
-            "This request requires human review before "
-            "the response can be released."
-        )
-    elif action == "FLAG":
-        response_text = (
-            "This request was flagged because a moderate "
-            "governance risk was detected."
-        )
-    else:
-        response_text = (
-            f"Governance evaluation completed for "
-            f"{application['name']}."
-        )
+    # Execute LangGraph Pipeline
+    pipeline_result = run_governance_pipeline(
+        prompt=prompt,
+        ai_response=payload.ai_response,
+        context_docs=payload.context_docs,
+        conversation_history=payload.history,
+        application_id=app_id,
+        policy=policy_dict,
+    )
+
+    action = pipeline_result["decision"]
+    reason = pipeline_result["decision_reason"]
+    risk = pipeline_result["composite_risk"]
+    evidence = pipeline_result["evidence"]
+    response_text = pipeline_result["safe_response"]
+    workflow_trace = pipeline_result["workflow_trace"]
+    multi_turn_risk = pipeline_result["multi_turn_risk"]
+    total_latency_ms = pipeline_result["total_latency_ms"]
 
     interaction_id = str(uuid.uuid4())
 
-    # IMPORTANT: populate every known legacy field.
     insert_compatible(
         db,
         "interactions",
@@ -1181,7 +1137,7 @@ def process_interaction(
             "id": interaction_id,
             "application_id": app_id,
             "app_id": app_id,
-            "user_id": current_user["id"],
+            "user_id": payload.user_id or "system",
             "prompt": prompt,
             "message": prompt,
             "decision": action,
@@ -1194,12 +1150,12 @@ def process_interaction(
         "risk_assessments",
         {
             "interaction_id": interaction_id,
-            "privacy": risk["privacy"],
-            "hallucination": risk["hallucination"],
-            "bias": risk["bias"],
-            "security": risk["security"],
-            "policy": risk["policy"],
-            "overall": risk["overall"],
+            "privacy": risk.get("privacy", 0.0),
+            "hallucination": risk.get("hallucination", 0.0),
+            "bias": risk.get("bias", 0.0),
+            "security": risk.get("security", 0.0),
+            "policy": risk.get("overall", 0.0),
+            "overall": risk.get("overall", 0.0),
             "evidence": str(evidence),
         },
     )
@@ -1240,6 +1196,9 @@ def process_interaction(
             ),
         },
         evidence,
+        workflow_trace=workflow_trace,
+        multi_turn_risk=multi_turn_risk,
+        latency_ms=total_latency_ms,
     )
 
 
@@ -1251,7 +1210,7 @@ def process_interaction(
 def root():
     return {
         "success": True,
-        "message": "ControlPanel.ai Governance API is running",
+        "message": "ControlPanel.ai Governance API is running (Auth-free mode)",
     }
 
 
@@ -1262,135 +1221,25 @@ def health():
 
 
 # ============================================================
-# AUTH
+# AUTH STUB (Backward compatibility for frontend)
 # ============================================================
 
-@app.post("/api/auth/google")
-def google_login(
-    payload: GoogleLoginRequest,
-    db: Session = Depends(get_db),
-):
-    if not firebase_admin._apps:
-        raise HTTPException(
-            status_code=500,
-            detail=(
-                "Firebase Admin is not configured. "
-                "Place the Firebase service-account JSON "
-                "inside the backend folder."
-            ),
-        )
-
-    try:
-        decoded = firebase_auth.verify_id_token(
-            payload.credential,
-            check_revoked=True,
-        )
-    except Exception as exc:
-        print("Firebase verification failed:", exc)
-        raise HTTPException(
-            status_code=401,
-            detail="Invalid or expired Firebase credential",
-        )
-
-    firebase_uid = decoded.get("uid")
-    email = decoded.get("email") or f"{firebase_uid}@firebase.local"
-    name = decoded.get("name") or email.split("@")[0]
-    picture = decoded.get("picture") or ""
-
-    user = row(
-        db,
-        "SELECT * FROM users WHERE google_sub = :sub LIMIT 1",
-        {"sub": firebase_uid},
-    )
-
-    if not user:
-        user = row(
-            db,
-            "SELECT * FROM users WHERE email = :email LIMIT 1",
-            {"email": email},
-        )
-
-    if user:
-        db.execute(
-            text("""
-                UPDATE users
-                SET google_sub = :sub,
-                    name = :name,
-                    picture = :picture
-                WHERE id = :id
-            """),
-            {
-                "sub": firebase_uid,
-                "name": name,
-                "picture": picture,
-                "id": user["id"],
-            },
-        )
-        db.commit()
-        user = row(
-            db,
-            "SELECT * FROM users WHERE id = :id",
-            {"id": user["id"]},
-        )
-    else:
-        user_id = str(uuid.uuid4())
-
-        insert_compatible(
-            db,
-            "users",
-            {
-                "id": user_id,
-                "email": email,
-                "password_hash": None,
-                "google_sub": firebase_uid,
-                "picture": picture,
-                "name": name,
-                "role": "ADMIN",
-            },
-        )
-        db.commit()
-
-        user = row(
-            db,
-            "SELECT * FROM users WHERE id = :id",
-            {"id": user_id},
-        )
-
-    seed_workspace_for_user(db, user["id"])
-    token = create_session(db, user["id"])
-
-    return {
-        "success": True,
-        "token": token,
-        "user": serialize_user(user),
-    }
-
-
 @app.get("/api/auth/me")
-def auth_me(
-    current_user=Depends(get_current_user),
-):
+def auth_me():
     return {
         "success": True,
-        "user": serialize_user(current_user),
+        "user": {
+            "id": "admin",
+            "email": "admin@controlplane.ai",
+            "name": "Enterprise Admin",
+            "role": "ADMIN",
+            "picture": "",
+        },
     }
 
 
 @app.post("/api/auth/logout")
-def logout(
-    authorization=Header(default=None),
-    db: Session = Depends(get_db),
-):
-    if authorization and authorization.startswith("Bearer "):
-        token = authorization.split(" ", 1)[1].strip()
-
-        if token:
-            db.execute(
-                text("DELETE FROM sessions WHERE token = :token"),
-                {"token": token},
-            )
-            db.commit()
-
+def logout():
     return {"success": True}
 
 
@@ -1400,7 +1249,6 @@ def logout(
 
 @app.get("/api/applications")
 def get_applications(
-    current_user=Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
     apps = rows(
@@ -1408,10 +1256,8 @@ def get_applications(
         """
         SELECT id, name, description, category
         FROM applications
-        WHERE owner_id = :owner_id
         ORDER BY id
         """,
-        {"owner_id": current_user["id"]},
     )
 
     return [
@@ -1428,7 +1274,6 @@ def get_applications(
 @app.get("/api/applications/{app_id}")
 def get_application(
     app_id: str,
-    current_user=Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
     application = row(
@@ -1436,10 +1281,10 @@ def get_application(
         """
         SELECT id, name, description, category
         FROM applications
-        WHERE id = :id AND owner_id = :owner_id
+        WHERE id = :id
         LIMIT 1
         """,
-        {"id": app_id, "owner_id": current_user["id"]},
+        {"id": app_id},
     )
 
     if not application:
@@ -1454,34 +1299,27 @@ def get_application(
 
 
 # ============================================================
-# CHAT
+# CHAT / INTERACTIONS
 # ============================================================
 
 @app.post("/api/chat")
 def chat(
     payload: InteractionRequest,
-    current_user=Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    return process_interaction(payload, db, current_user)
+    return process_interaction(payload, db)
 
 
 @app.post("/api/interactions")
 def create_interaction(
     payload: InteractionRequest,
-    current_user=Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    return process_interaction(payload, db, current_user)
+    return process_interaction(payload, db)
 
-
-# ============================================================
-# INTERACTIONS
-# ============================================================
 
 @app.get("/api/interactions")
 def get_interactions(
-    current_user=Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
     interactions = rows(
@@ -1489,10 +1327,8 @@ def get_interactions(
         """
         SELECT *
         FROM interactions
-        WHERE user_id = :user_id
         ORDER BY rowid DESC
         """,
-        {"user_id": current_user["id"]},
     )
 
     result = []
@@ -1537,7 +1373,6 @@ def get_interactions(
 @app.get("/api/interactions/{interaction_id}")
 def get_interaction(
     interaction_id: str,
-    current_user=Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
     interaction = row(
@@ -1545,12 +1380,11 @@ def get_interaction(
         """
         SELECT *
         FROM interactions
-        WHERE id = :id AND user_id = :user_id
+        WHERE id = :id
         LIMIT 1
         """,
         {
             "id": interaction_id,
-            "user_id": current_user["id"],
         },
     )
 
@@ -1593,7 +1427,6 @@ def get_interaction(
 
 @app.get("/api/dashboard")
 def dashboard(
-    current_user=Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
     interactions = rows(
@@ -1601,10 +1434,8 @@ def dashboard(
         """
         SELECT *
         FROM interactions
-        WHERE user_id = :user_id
         ORDER BY rowid DESC
         """,
-        {"user_id": current_user["id"]},
     )
 
     total = len(interactions)
@@ -1694,138 +1525,72 @@ def dashboard(
         },
         "recent_interactions": recent,
     }
+
+
 # ============================================================
 # CLEAR GOVERNANCE HISTORY
 # ============================================================
 
 @app.delete("/api/history")
 def clear_history(
-    current_user=Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """
-    Clear all governance interaction history
-    belonging to the currently logged-in user.
-
-    This removes:
-    - interactions
-    - decisions
-    - risk assessments
-
-    It does NOT remove:
-    - user account
-    - sessions
-    - policies
-    - applications
-    """
-
-    user_id = current_user["id"]
-
     try:
-        # ----------------------------------------------------
-        # Find this user's interactions
-        # ----------------------------------------------------
-
-        interaction_rows = rows(
-            db,
-            """
-            SELECT id
-            FROM interactions
-            WHERE user_id = :user_id
-            """,
-            {
-                "user_id": user_id,
-            },
-        )
-
-        interaction_ids = [
-            item["id"]
-            for item in interaction_rows
-        ]
-
-        # ----------------------------------------------------
-        # Delete related decisions
-        # ----------------------------------------------------
-
-        if interaction_ids:
-
-            for interaction_id in interaction_ids:
-
-                db.execute(
-                    text(
-                        """
-                        DELETE FROM decisions
-                        WHERE interaction_id = :interaction_id
-                        """
-                    ),
-                    {
-                        "interaction_id":
-                            interaction_id,
-                    },
-                )
-
-                # ------------------------------------------------
-                # Delete related risk assessments
-                # ------------------------------------------------
-
-                db.execute(
-                    text(
-                        """
-                        DELETE FROM risk_assessments
-                        WHERE interaction_id = :interaction_id
-                        """
-                    ),
-                    {
-                        "interaction_id":
-                            interaction_id,
-                    },
-                )
-
-        # ----------------------------------------------------
-        # Delete interactions
-        # ----------------------------------------------------
-
-        db.execute(
-            text(
-                """
-                DELETE FROM interactions
-                WHERE user_id = :user_id
-                """
-            ),
-            {
-                "user_id": user_id,
-            },
-        )
-
+        db.execute(text("DELETE FROM decisions"))
+        db.execute(text("DELETE FROM risk_assessments"))
+        db.execute(text("DELETE FROM interactions"))
         db.commit()
 
         return {
             "success": True,
             "message": "Governance history cleared successfully.",
-            "deleted": len(interaction_ids),
         }
 
     except Exception as error:
-
         db.rollback()
-
-        print(
-            "Clear history error:",
-            error,
-        )
-
+        print("Clear history error:", error)
         raise HTTPException(
             status_code=500,
             detail="Unable to clear governance history.",
         )
 
+
 # ============================================================
 # POLICIES
 # ============================================================
 
+@app.post("/api/policies")
+def create_policy(
+    payload: PolicyCreate,
+    db: Session = Depends(get_db),
+):
+    policy_id = str(uuid.uuid4())
+    insert_compatible(
+        db,
+        "policies",
+        {
+            "id": policy_id,
+            "name": payload.name,
+            "description": payload.description or "",
+            "application_id": payload.application_id or "",
+            "pii_action": payload.pii_action or "BLOCK",
+            "hallucination_threshold": clamp(payload.hallucination_threshold or 0.70),
+            "bias_threshold": clamp(payload.bias_threshold or 0.60),
+            "injection_action": payload.injection_action or "BLOCK",
+            "human_review_threshold": clamp(payload.human_review_threshold or 0.75),
+            "privacy_threshold": clamp(payload.privacy_threshold or 0.80),
+            "security_threshold": clamp(payload.security_threshold or 0.80),
+            "policy_threshold": clamp(payload.policy_threshold or 0.70),
+            "active": 1 if payload.active else 0,
+            "version": payload.version or "1.0",
+        },
+    )
+    db.commit()
+    return get_policy(policy_id, db)
+
+
 @app.get("/api/policies")
 def get_policies(
-    current_user=Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
     policies = rows(
@@ -1833,10 +1598,8 @@ def get_policies(
         """
         SELECT *
         FROM policies
-        WHERE owner_id = :owner_id
         ORDER BY id
         """,
-        {"owner_id": current_user["id"]},
     )
 
     return [
@@ -1862,7 +1625,6 @@ def get_policies(
 @app.get("/api/policies/{policy_id}")
 def get_policy(
     policy_id: str,
-    current_user=Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
     p = row(
@@ -1870,10 +1632,10 @@ def get_policy(
         """
         SELECT *
         FROM policies
-        WHERE id = :id AND owner_id = :owner_id
+        WHERE id = :id
         LIMIT 1
         """,
-        {"id": policy_id, "owner_id": current_user["id"]},
+        {"id": policy_id},
     )
 
     if not p:
@@ -1901,7 +1663,6 @@ def get_policy(
 def update_policy(
     policy_id: str,
     payload: PolicyUpdate,
-    current_user=Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
     p = row(
@@ -1909,10 +1670,10 @@ def update_policy(
         """
         SELECT *
         FROM policies
-        WHERE id = :id AND owner_id = :owner_id
+        WHERE id = :id
         LIMIT 1
         """,
-        {"id": policy_id, "owner_id": current_user["id"]},
+        {"id": policy_id},
     )
 
     if not p:
@@ -1945,12 +1706,11 @@ def update_policy(
         db.execute(
             text(
                 f'UPDATE policies SET {assignments} '
-                'WHERE id = :policy_id AND owner_id = :owner_id'
+                'WHERE id = :policy_id'
             ),
             {
                 **updates,
                 "policy_id": policy_id,
-                "owner_id": current_user["id"],
             },
         )
         db.commit()
@@ -1959,7 +1719,6 @@ def update_policy(
         "success": True,
         "policy": get_policy(
             policy_id,
-            current_user,
             db,
         ),
     }
@@ -1971,7 +1730,6 @@ def update_policy(
 
 @app.get("/api/incidents")
 def incidents(
-    current_user=Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
     interactions = rows(
@@ -1979,10 +1737,8 @@ def incidents(
         """
         SELECT *
         FROM interactions
-        WHERE user_id = :user_id
         ORDER BY rowid DESC
         """,
-        {"user_id": current_user["id"]},
     )
 
     result = []
@@ -2038,12 +1794,11 @@ def incidents(
 
 @app.get("/api/human-review")
 def human_review_queue(
-    current_user=Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
     return [
         incident
-        for incident in incidents(current_user, db)
+        for incident in incidents(db)
         if incident["decision"] == "HUMAN_REVIEW"
     ]
 
@@ -2051,19 +1806,17 @@ def human_review_queue(
 @app.post("/api/human-review/{interaction_id}/approve")
 def approve_review(
     interaction_id: str,
-    current_user=Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
     interaction = row(
         db,
         """
         SELECT * FROM interactions
-        WHERE id = :id AND user_id = :user_id
+        WHERE id = :id
         LIMIT 1
         """,
         {
             "id": interaction_id,
-            "user_id": current_user["id"],
         },
     )
 
@@ -2081,7 +1834,6 @@ def approve_review(
         {"id": interaction_id},
     )
 
-    # Keep legacy interactions.decision synchronized.
     if "decision" in columns("interactions"):
         db.execute(
             text("""
@@ -2105,19 +1857,17 @@ def approve_review(
 @app.post("/api/human-review/{interaction_id}/reject")
 def reject_review(
     interaction_id: str,
-    current_user=Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
     interaction = row(
         db,
         """
         SELECT * FROM interactions
-        WHERE id = :id AND user_id = :user_id
+        WHERE id = :id
         LIMIT 1
         """,
         {
             "id": interaction_id,
-            "user_id": current_user["id"],
         },
     )
 
@@ -2159,7 +1909,6 @@ def reject_review(
 def edit_review(
     interaction_id: str,
     payload: ReviewRequest,
-    current_user=Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
     if payload.action not in {"ALLOW", "BLOCK", "EDIT"}:
@@ -2172,12 +1921,11 @@ def edit_review(
         db,
         """
         SELECT * FROM interactions
-        WHERE id = :id AND user_id = :user_id
+        WHERE id = :id
         LIMIT 1
         """,
         {
             "id": interaction_id,
-            "user_id": current_user["id"],
         },
     )
 
@@ -2231,11 +1979,9 @@ def edit_review(
 def startup():
     ensure_schema()
     with SessionLocal() as db:
-        # Make sure all existing user workspaces have their default data.
-        users = rows(db, "SELECT id FROM users")
-        for user in users:
-            try:
-                seed_workspace_for_user(db, user["id"])
-            except Exception as exc:
-                db.rollback()
-                print("Workspace repair warning:", exc)
+        try:
+            seed_workspace(db)
+        except Exception as exc:
+            db.rollback()
+            print("Workspace seeding warning:", exc)
+

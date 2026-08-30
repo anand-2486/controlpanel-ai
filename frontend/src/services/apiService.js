@@ -38,12 +38,21 @@ export async function sendChatMessage({
   applicationId,
   userId,
   message,
+  prompt,
+  ai_response,
+  context_docs,
+  history,
 }) {
+  const text = message || prompt
   const response =
     await api.post("/api/chat", {
       application_id: applicationId,
       user_id: userId,
-      message,
+      message: text,
+      prompt: text,
+      ai_response,
+      context_docs,
+      history,
     })
 
   return response.data

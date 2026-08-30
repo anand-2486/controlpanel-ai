@@ -3,8 +3,7 @@ import {
   ChevronDown,
   Moon,
   Sun,
-  LogOut,
-  UserRoundPlus,
+  ShieldCheck,
 } from "lucide-react"
 
 import {
@@ -13,8 +12,6 @@ import {
   useState,
 } from "react"
 
-import { signOut } from "firebase/auth"
-import { auth } from "../../services/firebase"
 import { useNavigate } from "react-router-dom"
 
 
@@ -155,113 +152,9 @@ function Topbar({
   // USER DETAILS
   // ----------------------------------------------------------
 
-  const displayName =
-    user?.displayName ||
-    user?.name ||
-    user?.display_name ||
-    user?.email?.split("@")[0] ||
-    "User"
-
-  const email =
-    user?.email || ""
-
-  const initials =
-    displayName
-      .split(" ")
-      .filter(Boolean)
-      .slice(0, 2)
-      .map(
-        (part) =>
-          part[0]?.toUpperCase()
-      )
-      .join("") ||
-    "U"
-
-
-  // ----------------------------------------------------------
-  // SIGN OUT
-  // ----------------------------------------------------------
-
-  async function handleSignOut() {
-    setAccountOpen(false)
-
-    try {
-      await signOut(auth)
-    } catch (error) {
-      console.log(
-        "Firebase sign-out:",
-        error
-      )
-    }
-
-    localStorage.removeItem(
-      "controlpanel_token"
-    )
-
-    localStorage.removeItem(
-      "controlpanel_user"
-    )
-
-    sessionStorage.removeItem(
-      "controlpanel_token"
-    )
-
-    sessionStorage.removeItem(
-      "controlpanel_user"
-    )
-
-    window.dispatchEvent(
-      new Event("auth-changed")
-    )
-
-    navigate(
-      "/signin",
-      { replace: true }
-    )
-  }
-
-
-  // ----------------------------------------------------------
-  // CHANGE ACCOUNT
-  // ----------------------------------------------------------
-
-  async function handleChangeAccount() {
-    setAccountOpen(false)
-
-    try {
-      await signOut(auth)
-    } catch (error) {
-      console.log(
-        "Firebase sign-out:",
-        error
-      )
-    }
-
-    localStorage.removeItem(
-      "controlpanel_token"
-    )
-
-    localStorage.removeItem(
-      "controlpanel_user"
-    )
-
-    sessionStorage.removeItem(
-      "controlpanel_token"
-    )
-
-    sessionStorage.removeItem(
-      "controlpanel_user"
-    )
-
-    window.dispatchEvent(
-      new Event("auth-changed")
-    )
-
-    navigate(
-      "/signin?switch=1",
-      { replace: true }
-    )
-  }
+  const displayName = "Enterprise Admin"
+  const email = "admin@controlplane.ai"
+  const initials = "EA"
 
 
   // ----------------------------------------------------------
@@ -572,14 +465,9 @@ function Topbar({
 
               </div>
 
+              {/* SYSTEM STATUS */}
 
-              {/* CHANGE ACCOUNT */}
-
-              <button
-                type="button"
-                onClick={
-                  handleChangeAccount
-                }
+              <div
                 className="
                   flex
                   w-full
@@ -590,24 +478,20 @@ function Topbar({
                   text-left
                   text-sm
                   text-slate-700
-                  transition
-                  hover:bg-slate-50
 
                   dark:text-slate-200
-                  dark:hover:bg-slate-800
                 "
               >
-
-                <UserRoundPlus
+                <ShieldCheck
                   size={16}
                   className="
-                    text-slate-400
+                    text-emerald-500
                   "
                 />
 
                 <div>
                   <p className="font-medium">
-                    Change account
+                    Auth-Free Production Mode
                   </p>
 
                   <p
@@ -616,59 +500,11 @@ function Topbar({
                       text-slate-400
                     "
                   >
-                    Sign in with another Google account
+                    Open governance control plane
                   </p>
                 </div>
 
-              </button>
-
-
-              {/* SIGN OUT */}
-
-              <button
-                type="button"
-                onClick={
-                  handleSignOut
-                }
-                className="
-                  flex
-                  w-full
-                  items-center
-                  gap-3
-                  border-t
-                  border-slate-100
-                  px-4
-                  py-3
-                  text-left
-                  text-sm
-                  text-red-600
-                  transition
-                  hover:bg-red-50
-
-                  dark:border-slate-800
-                  dark:text-red-400
-                  dark:hover:bg-red-950/30
-                "
-              >
-
-                <LogOut size={16} />
-
-                <div>
-                  <p className="font-medium">
-                    Sign out
-                  </p>
-
-                  <p
-                    className="
-                      text-xs
-                      text-red-400
-                    "
-                  >
-                    End this session
-                  </p>
-                </div>
-
-              </button>
+              </div>
 
             </div>
           )}
